@@ -232,11 +232,11 @@ impl GraphicsPipeline {
 
         struct PerPipelineShaderStageCreateInfo {
             name_vk: CString,
-            specialization_info_vk: ash::vk::SpecializationInfo,
+            specialization_info_vk: ash::vk::SpecializationInfo<'static>,
             specialization_map_entries_vk: Vec<ash::vk::SpecializationMapEntry>,
             specialization_data_vk: Vec<u8>,
             required_subgroup_size_create_info:
-                Option<ash::vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo>,
+                Option<ash::vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo<'static>>,
         }
 
         let (mut stages_vk, mut per_stage_vk): (SmallVec<[_; 5]>, SmallVec<[_; 5]>) = stages
@@ -287,12 +287,13 @@ impl GraphicsPipeline {
                         ..Default::default()
                     },
                     PerPipelineShaderStageCreateInfo {
-                        name_vk: CString::new(entry_point_info.name.as_str()).unwrap(),
+                        name_vk: CString::new(entry_point_info.name.as_str()).unwrap(), // TODO Borrow CStr for local data?
                         specialization_info_vk: ash::vk::SpecializationInfo {
                             map_entry_count: specialization_map_entries_vk.len() as u32,
                             p_map_entries: ptr::null(),
                             data_size: specialization_data_vk.len(),
                             p_data: ptr::null(),
+                            ..Default::default()
                         },
                         specialization_map_entries_vk,
                         specialization_data_vk,
@@ -317,7 +318,7 @@ impl GraphicsPipeline {
                 p_next: required_subgroup_size_create_info.as_ref().map_or(
                     ptr::null(),
                     |required_subgroup_size_create_info| {
-                        required_subgroup_size_create_info as *const _ as _
+                        <*const _>::cast(required_subgroup_size_create_info)
                     },
                 ),
                 p_name: name_vk.as_ptr(),
@@ -327,7 +328,7 @@ impl GraphicsPipeline {
 
             *specialization_info_vk = ash::vk::SpecializationInfo {
                 p_map_entries: specialization_map_entries_vk.as_ptr(),
-                p_data: specialization_data_vk.as_ptr() as _,
+                p_data: specialization_data_vk.as_ptr().cast(),
                 ..*specialization_info_vk
             };
         }
@@ -407,7 +408,7 @@ impl GraphicsPipeline {
 
                 // VUID-VkPipelineVertexInputDivisorStateCreateInfoEXT-vertexBindingDivisorCount-arraylength
                 if !vertex_binding_divisor_descriptions_vk.is_empty() {
-                    vertex_input_state.p_next = vertex_binding_divisor_state_vk.insert(
+                    let next = vertex_binding_divisor_state_vk.insert(
                         ash::vk::PipelineVertexInputDivisorStateCreateInfoEXT {
                             vertex_binding_divisor_count: vertex_binding_divisor_descriptions_vk
                                 .len()
@@ -416,7 +417,8 @@ impl GraphicsPipeline {
                                 .as_ptr(),
                             ..Default::default()
                         },
-                    ) as *const _ as *const _;
+                    );
+                    vertex_input_state.p_next = <*const _>::cast(next);
                 }
             }
         }
@@ -464,7 +466,7 @@ impl GraphicsPipeline {
 
                 tessellation_domain_origin_state_vk.p_next = tessellation_state_vk.p_next;
                 tessellation_state_vk.p_next =
-                    tessellation_domain_origin_state_vk as *const _ as *const _;
+                    <*const _>::cast(tessellation_domain_origin_state_vk);
             }
         }
 
@@ -558,7 +560,7 @@ impl GraphicsPipeline {
                         (ash::vk::FALSE, 1, 0)
                     };
 
-                rasterization_state.p_next = rasterization_line_state_vk.insert(
+                let next = rasterization_line_state_vk.insert(
                     ash::vk::PipelineRasterizationLineStateCreateInfoEXT {
                         line_rasterization_mode: line_rasterization_mode.into(),
                         stippled_line_enable,
@@ -566,7 +568,8 @@ impl GraphicsPipeline {
                         line_stipple_pattern,
                         ..Default::default()
                     },
-                ) as *const _ as *const _;
+                );
+                rasterization_state.p_next = <*const _>::cast(next);
             }
         }
 
@@ -594,7 +597,7 @@ impl GraphicsPipeline {
                 rasterization_samples: rasterization_samples.into(),
                 sample_shading_enable,
                 min_sample_shading,
-                p_sample_mask: sample_mask as _,
+                p_sample_mask: sample_mask.as_ptr(),
                 alpha_to_coverage_enable: alpha_to_coverage_enable as ash::vk::Bool32,
                 alpha_to_one_enable: alpha_to_one_enable as ash::vk::Bool32,
                 ..Default::default()
@@ -742,12 +745,12 @@ impl GraphicsPipeline {
                     },
                 ));
 
-                color_blend_state_vk.p_next =
-                    color_write_vk.insert(ash::vk::PipelineColorWriteCreateInfoEXT {
-                        attachment_count: color_write_enables_vk.len() as u32,
-                        p_color_write_enables: color_write_enables_vk.as_ptr(),
-                        ..Default::default()
-                    }) as *const _ as *const _;
+                let next = color_write_vk.insert(ash::vk::PipelineColorWriteCreateInfoEXT {
+                    attachment_count: color_write_enables_vk.len() as u32,
+                    p_color_write_enables: color_write_enables_vk.as_ptr(),
+                    ..Default::default()
+                });
+                color_blend_state_vk.p_next = <*const _>::cast(next);
             }
         }
 
@@ -852,39 +855,39 @@ impl GraphicsPipeline {
             p_stages: stages_vk.as_ptr(),
             p_vertex_input_state: vertex_input_state_vk
                 .as_ref()
-                .map(|p| p as *const _)
+                .map(|p| -> *const _ { p })
                 .unwrap_or(ptr::null()),
             p_input_assembly_state: input_assembly_state_vk
                 .as_ref()
-                .map(|p| p as *const _)
+                .map(|p| -> *const _ { p })
                 .unwrap_or(ptr::null()),
             p_tessellation_state: tessellation_state_vk
                 .as_ref()
-                .map(|p| p as *const _)
+                .map(|p| -> *const _ { p })
                 .unwrap_or(ptr::null()),
             p_viewport_state: viewport_state_vk
                 .as_ref()
-                .map(|p| p as *const _)
+                .map(|p| -> *const _ { p })
                 .unwrap_or(ptr::null()),
             p_rasterization_state: rasterization_state_vk
                 .as_ref()
-                .map(|p| p as *const _)
+                .map(|p| -> *const _ { p })
                 .unwrap_or(ptr::null()),
             p_multisample_state: multisample_state_vk
                 .as_ref()
-                .map(|p| p as *const _)
+                .map(|p| -> *const _ { p })
                 .unwrap_or(ptr::null()),
             p_depth_stencil_state: depth_stencil_state_vk
                 .as_ref()
-                .map(|p| p as *const _)
+                .map(|p| -> *const _ { p })
                 .unwrap_or(ptr::null()),
             p_color_blend_state: color_blend_state_vk
                 .as_ref()
-                .map(|p| p as *const _)
+                .map(|p| -> *const _ { p })
                 .unwrap_or(ptr::null()),
             p_dynamic_state: dynamic_state_vk
                 .as_ref()
-                .map(|s| s as *const _)
+                .map(|p| -> *const _ { p })
                 .unwrap_or(ptr::null()),
             layout: layout.handle(),
             render_pass: render_pass_vk,
@@ -898,17 +901,17 @@ impl GraphicsPipeline {
 
         if let Some(info) = discard_rectangle_state_vk.as_mut() {
             info.p_next = create_info_vk.p_next;
-            create_info_vk.p_next = info as *const _ as *const _;
+            create_info_vk.p_next = <*const _>::cast(info);
         }
 
         if let Some(info) = conservative_rasterization_state_vk.as_mut() {
             info.p_next = create_info_vk.p_next;
-            create_info_vk.p_next = info as *const _ as *const _;
+            create_info_vk.p_next = <*const _>::cast(info);
         }
 
         if let Some(info) = rendering_create_info_vk.as_mut() {
             info.p_next = create_info_vk.p_next;
-            create_info_vk.p_next = info as *const _ as *const _;
+            create_info_vk.p_next = <*const _>::cast(info);
         }
 
         let cache_handle = match cache.as_ref() {

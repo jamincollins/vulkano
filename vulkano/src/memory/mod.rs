@@ -146,11 +146,43 @@ impl ResourceMemory {
         unsafe { Self::new_dedicated_unchecked(Arc::new(device_memory)) }
     }
 
-    #[cfg_attr(not(feature = "document_unchecked"), doc(hidden))]
+    /// Same as [`new_dedicated`], except that this allows creating aliasing resources.
+    ///
+    /// # Safety
+    ///
+    /// - Two resources must not alias each other, and if they do, you must ensure correct
+    ///   synchronization yourself.
     pub unsafe fn new_dedicated_unchecked(device_memory: Arc<DeviceMemory>) -> Self {
+        let size = device_memory.allocation_size();
+
+        unsafe { Self::from_device_memory_unchecked(device_memory, 0, size) }
+    }
+
+    /// Creates a new `ResourceMemory` from the given portion of the given device memory block. You
+    /// may use this when you need to portion an existing memory block in a specific way. Note that
+    /// when you don't have this requirement of placing resources at specific offsets, you should
+    /// use a memory allocator instead.
+    ///
+    /// # Safety
+    ///
+    /// - Two resources must not alias each other (as returned by [`Buffer::memory_requirements`]
+    ///   or [`Image::memory_requirements`]), and if they do, you must ensure correct
+    ///   synchronization yourself.
+    ///
+    /// # Panics
+    ///
+    /// - Panics if `offset + size` is greater than `device_memory.allocation_size()`.
+    pub unsafe fn from_device_memory_unchecked(
+        device_memory: Arc<DeviceMemory>,
+        offset: DeviceSize,
+        size: DeviceSize,
+    ) -> Self {
+        assert!(offset <= device_memory.allocation_size());
+        assert!(size <= device_memory.allocation_size() - offset);
+
         ResourceMemory {
-            offset: 0,
-            size: device_memory.allocation_size(),
+            offset,
+            size,
             allocation_type: AllocationType::Unknown,
             allocation_handle: AllocationHandle::null(),
             suballocation_handle: None,
@@ -453,14 +485,16 @@ impl From<ash::vk::PhysicalDeviceMemoryProperties> for MemoryProperties {
     #[inline]
     fn from(val: ash::vk::PhysicalDeviceMemoryProperties) -> Self {
         Self {
-            memory_types: val.memory_types[0..val.memory_type_count as usize]
+            memory_types: val
+                .memory_types_as_slice()
                 .iter()
                 .map(|vk_memory_type| MemoryType {
                     property_flags: vk_memory_type.property_flags.into(),
                     heap_index: vk_memory_type.heap_index,
                 })
                 .collect(),
-            memory_heaps: val.memory_heaps[0..val.memory_heap_count as usize]
+            memory_heaps: val
+                .memory_heaps_as_slice()
                 .iter()
                 .map(|vk_memory_heap| MemoryHeap {
                     size: vk_memory_heap.size,

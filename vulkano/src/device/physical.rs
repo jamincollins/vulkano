@@ -30,7 +30,6 @@ use crate::{
 use bytemuck::cast_slice;
 use parking_lot::RwLock;
 use std::{
-    ffi::CStr,
     fmt::{Debug, Error as FmtError, Formatter},
     mem::MaybeUninit,
     num::NonZeroU64,
@@ -560,9 +559,8 @@ impl PhysicalDevice {
                     self.display_properties
                         .get_or_insert(properties_vk.display, |&handle| {
                             let properties = DisplayProperties {
-                                name: properties_vk.display_name.as_ref().map(|name| {
-                                    CStr::from_ptr(name)
-                                        .to_str()
+                                name: properties_vk.display_name_as_c_str().map(|name| {
+                                    name.to_str()
                                         .expect("non UTF-8 characters in display name")
                                         .to_owned()
                                 }),
@@ -621,9 +619,8 @@ impl PhysicalDevice {
                     self.display_properties
                         .get_or_insert(properties_vk.display, |&handle| {
                             let properties = DisplayProperties {
-                                name: properties_vk.display_name.as_ref().map(|name| {
-                                    CStr::from_ptr(name)
-                                        .to_str()
+                                name: properties_vk.display_name_as_c_str().map(|name| {
+                                    name.to_str()
                                         .expect("non UTF-8 characters in display name")
                                         .to_owned()
                                 }),
@@ -815,7 +812,10 @@ impl PhysicalDevice {
                 .collect()
         };
 
-        *self.display_plane_properties.write() = properties_raw.clone();
+        self.display_plane_properties
+            .write()
+            .clone_from(&properties_raw);
+
         Ok(properties_raw)
     }
 
@@ -1205,7 +1205,7 @@ impl PhysicalDevice {
                         });
 
                     next.p_next = external_semaphore_info_vk.p_next;
-                    external_semaphore_info_vk.p_next = next as *const _ as *const _;
+                    external_semaphore_info_vk.p_next = <*const _>::cast(next);
                 }
 
                 /* Output */
@@ -1288,14 +1288,14 @@ impl PhysicalDevice {
             {
                 let next = format_properties3_vk.insert(ash::vk::FormatProperties3KHR::default());
                 next.p_next = format_properties2_vk.p_next;
-                format_properties2_vk.p_next = next as *mut _ as *mut _;
+                format_properties2_vk.p_next = <*mut _>::cast(next);
             }
 
             if self.supported_extensions().ext_image_drm_format_modifier {
                 let next = drm_format_modifier_properties_list_vk
                     .insert(ash::vk::DrmFormatModifierPropertiesListEXT::default());
                 next.p_next = format_properties2_vk.p_next;
-                format_properties2_vk.p_next = next as *mut _ as *mut _;
+                format_properties2_vk.p_next = <*mut _>::cast(next);
 
                 if self.api_version() >= Version::V1_3
                     || self.supported_extensions().khr_format_feature_flags2
@@ -1303,7 +1303,7 @@ impl PhysicalDevice {
                     let next = drm_format_modifier_properties_list2_vk
                         .insert(ash::vk::DrmFormatModifierPropertiesList2EXT::default());
                     next.p_next = format_properties2_vk.p_next;
-                    format_properties2_vk.p_next = next as *mut _ as *mut _;
+                    format_properties2_vk.p_next = <*mut _>::cast(next);
                 }
             }
 
@@ -1514,7 +1514,7 @@ impl PhysicalDevice {
 
                     let (sharing_mode, queue_family_index_count, p_queue_family_indices) =
                         match sharing {
-                            Sharing::Exclusive => (ash::vk::SharingMode::EXCLUSIVE, 0, &[] as _),
+                            Sharing::Exclusive => (ash::vk::SharingMode::EXCLUSIVE, 0, ptr::null()),
                             Sharing::Concurrent(queue_family_indices) => (
                                 ash::vk::SharingMode::CONCURRENT,
                                 queue_family_indices.len() as u32,
@@ -1533,7 +1533,7 @@ impl PhysicalDevice {
                     );
 
                     next.p_next = info2_vk.p_next;
-                    info2_vk.p_next = next as *const _ as *const _;
+                    info2_vk.p_next = <*const _>::cast(next);
                 }
 
                 if let Some(handle_type) = external_memory_handle_type {
@@ -1544,7 +1544,7 @@ impl PhysicalDevice {
                         });
 
                     next.p_next = info2_vk.p_next;
-                    info2_vk.p_next = next as *const _ as *const _;
+                    info2_vk.p_next = <*const _>::cast(next);
                 }
 
                 if !view_formats.is_empty() {
@@ -1561,7 +1561,7 @@ impl PhysicalDevice {
                     });
 
                     next.p_next = info2_vk.p_next;
-                    info2_vk.p_next = next as *const _ as *const _;
+                    info2_vk.p_next = <*const _>::cast(next);
                 }
 
                 if let Some(image_view_type) = image_view_type {
@@ -1572,8 +1572,8 @@ impl PhysicalDevice {
                         },
                     );
 
-                    next.p_next = info2_vk.p_next as *mut _;
-                    info2_vk.p_next = next as *const _ as *const _;
+                    next.p_next = info2_vk.p_next.cast_mut();
+                    info2_vk.p_next = <*const _>::cast(next);
                 }
 
                 if let Some(stencil_usage) = stencil_usage {
@@ -1582,8 +1582,8 @@ impl PhysicalDevice {
                         ..Default::default()
                     });
 
-                    next.p_next = info2_vk.p_next as *mut _;
-                    info2_vk.p_next = next as *const _ as *const _;
+                    next.p_next = info2_vk.p_next.cast_mut();
+                    info2_vk.p_next = <*const _>::cast(next);
                 }
 
                 /* Output */
@@ -1597,7 +1597,7 @@ impl PhysicalDevice {
                         .insert(ash::vk::ExternalImageFormatProperties::default());
 
                     next.p_next = properties2_vk.p_next;
-                    properties2_vk.p_next = next as *mut _ as *mut _;
+                    properties2_vk.p_next = <*mut _>::cast(next);
                 }
 
                 if image_view_info_vk.is_some() {
@@ -1605,7 +1605,7 @@ impl PhysicalDevice {
                         .insert(ash::vk::FilterCubicImageViewImageFormatPropertiesEXT::default());
 
                     next.p_next = properties2_vk.p_next;
-                    properties2_vk.p_next = next as *mut _ as *mut _;
+                    properties2_vk.p_next = <*mut _>::cast(next);
                 }
 
                 let result = {
@@ -2069,8 +2069,8 @@ impl PhysicalDevice {
                 ..Default::default()
             });
 
-            next.p_next = info_vk.p_next as *mut _;
-            info_vk.p_next = next as *const _ as *const _;
+            next.p_next = info_vk.p_next.cast_mut();
+            info_vk.p_next = <*const _>::cast(next);
         }
 
         if full_screen_exclusive != FullScreenExclusive::Default {
@@ -2080,8 +2080,8 @@ impl PhysicalDevice {
                     ..Default::default()
                 });
 
-            next.p_next = info_vk.p_next as *mut _;
-            info_vk.p_next = next as *const _ as *const _;
+            next.p_next = info_vk.p_next.cast_mut();
+            info_vk.p_next = <*const _>::cast(next);
         }
 
         if let Some(win32_monitor) = win32_monitor {
@@ -2092,8 +2092,8 @@ impl PhysicalDevice {
                 },
             );
 
-            next.p_next = info_vk.p_next as *mut _;
-            info_vk.p_next = next as *const _ as *const _;
+            next.p_next = info_vk.p_next.cast_mut();
+            info_vk.p_next = <*const _>::cast(next);
         }
 
         /* Output */
@@ -2110,8 +2110,8 @@ impl PhysicalDevice {
             let next = capabilities_full_screen_exclusive_vk
                 .insert(ash::vk::SurfaceCapabilitiesFullScreenExclusiveEXT::default());
 
-            next.p_next = capabilities_vk.p_next as *mut _;
-            capabilities_vk.p_next = next as *mut _ as *mut _;
+            next.p_next = capabilities_vk.p_next.cast();
+            capabilities_vk.p_next = <*mut _>::cast(next);
         }
 
         if present_mode.is_some() {
@@ -2124,16 +2124,16 @@ impl PhysicalDevice {
                     },
                 );
 
-                next.p_next = capabilities_vk.p_next as *mut _;
-                capabilities_vk.p_next = next as *mut _ as *mut _;
+                next.p_next = capabilities_vk.p_next.cast();
+                capabilities_vk.p_next = <*mut _>::cast(next);
             }
 
             {
                 let next = capabilities_present_scaling_vk
                     .insert(ash::vk::SurfacePresentScalingCapabilitiesEXT::default());
 
-                next.p_next = capabilities_vk.p_next as *mut _;
-                capabilities_vk.p_next = next as *mut _ as *mut _;
+                next.p_next = capabilities_vk.p_next.cast();
+                capabilities_vk.p_next = <*mut _>::cast(next);
             }
         }
 
@@ -2145,8 +2145,8 @@ impl PhysicalDevice {
             let next = capabilities_protected_vk
                 .insert(ash::vk::SurfaceProtectedCapabilitiesKHR::default());
 
-            next.p_next = capabilities_vk.p_next as *mut _;
-            capabilities_vk.p_next = next as *mut _ as *mut _;
+            next.p_next = capabilities_vk.p_next.cast();
+            capabilities_vk.p_next = <*mut _>::cast(next);
         }
 
         let fns = self.instance.fns();
@@ -2472,8 +2472,8 @@ impl PhysicalDevice {
                         ..Default::default()
                     });
 
-                    next.p_next = info_vk.p_next as *mut _;
-                    info_vk.p_next = next as *const _ as *const _;
+                    next.p_next = info_vk.p_next.cast_mut();
+                    info_vk.p_next = <*const _>::cast(next);
                 }
 
                 if full_screen_exclusive != FullScreenExclusive::Default {
@@ -2484,8 +2484,8 @@ impl PhysicalDevice {
                         },
                     );
 
-                    next.p_next = info_vk.p_next as *mut _;
-                    info_vk.p_next = next as *const _ as *const _;
+                    next.p_next = info_vk.p_next.cast_mut();
+                    info_vk.p_next = <*const _>::cast(next);
                 }
 
                 if let Some(win32_monitor) = win32_monitor {
@@ -2496,8 +2496,8 @@ impl PhysicalDevice {
                         },
                     );
 
-                    next.p_next = info_vk.p_next as *mut _;
-                    info_vk.p_next = next as *const _ as *const _;
+                    next.p_next = info_vk.p_next.cast_mut();
+                    info_vk.p_next = <*const _>::cast(next);
                 }
 
                 let fns = self.instance.fns();
@@ -2751,8 +2751,8 @@ impl PhysicalDevice {
                         },
                     );
 
-                    next.p_next = info_vk.p_next as *mut _;
-                    info_vk.p_next = next as *const _ as *const _;
+                    next.p_next = info_vk.p_next.cast_mut();
+                    info_vk.p_next = <*const _>::cast(next);
                 }
 
                 if let Some(win32_monitor) = win32_monitor {
@@ -2763,8 +2763,8 @@ impl PhysicalDevice {
                         },
                     );
 
-                    next.p_next = info_vk.p_next as *mut _;
-                    info_vk.p_next = next as *const _ as *const _;
+                    next.p_next = info_vk.p_next.cast_mut();
+                    info_vk.p_next = <*const _>::cast(next);
                 }
 
                 let fns = self.instance.fns();
@@ -3624,6 +3624,27 @@ impl From<ash::vk::ShaderCorePropertiesFlagsAMD> for ShaderCoreProperties {
     fn from(_val: ash::vk::ShaderCorePropertiesFlagsAMD) -> Self {
         Self {}
     }
+}
+
+vulkan_enum! {
+    #[non_exhaustive]
+
+    LayeredDriverUnderlyingApi = LayeredDriverUnderlyingApiMSFT(i32);
+
+    // TODO: document
+    None = NONE,
+
+    // TODO: document
+    D3D12 = D3D12,
+}
+
+vulkan_bitflags! {
+    #[non_exhaustive]
+
+    PhysicalDeviceSchedulingControlsFlags = PhysicalDeviceSchedulingControlsFlagsARM(u64);
+
+    // TODO: document
+    SHADER_CORE_COUNT = SHADER_CORE_COUNT,
 }
 
 vulkan_bitflags! {

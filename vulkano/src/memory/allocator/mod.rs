@@ -219,8 +219,8 @@ pub use self::{
 };
 use super::{
     DedicatedAllocation, DeviceAlignment, DeviceMemory, ExternalMemoryHandleTypes,
-    MemoryAllocateFlags, MemoryAllocateInfo, MemoryMapInfo, MemoryProperties, MemoryPropertyFlags,
-    MemoryRequirements, MemoryType,
+    MemoryAllocateFlags, MemoryAllocateInfo, MemoryMapFlags, MemoryMapInfo, MemoryProperties,
+    MemoryPropertyFlags, MemoryRequirements, MemoryType,
 };
 use crate::{
     device::{Device, DeviceOwned},
@@ -511,7 +511,7 @@ impl MemoryTypeFilter {
     /// because the memory is only written once before being consumed by the device and becoming
     /// outdated, it doesn't matter that the data is potentially transferred over the PCIe bus
     /// since it only happens once. Since this is only a preference, if you have some requirements
-    /// such as the memory being [`HOST_VISIBLE`], those requirements will take precendence.
+    /// such as the memory being [`HOST_VISIBLE`], those requirements will take precedence.
     ///
     /// For memory that the host doesn't access, and the device doesn't access directly, you may
     /// still prefer device-local memory if the memory is used regularly. For instance, an image
@@ -1094,6 +1094,7 @@ impl<S> GenericMemoryAllocator<S> {
             // - Mapping the whole range is always valid.
             unsafe {
                 memory.map_unchecked(MemoryMapInfo {
+                    flags: MemoryMapFlags::empty(),
                     offset: 0,
                     size: memory.allocation_size(),
                     _ne: crate::NonExhaustive(()),
@@ -1454,12 +1455,14 @@ unsafe impl<S: Suballocator + Send + 'static> MemoryAllocator for GenericMemoryA
         if let Some(suballocation) = allocation.suballocation {
             let memory_type_index = allocation.device_memory.memory_type_index();
             let pool = self.pools[memory_type_index as usize].blocks.lock();
-            let block_ptr = allocation.allocation_handle.0 as *mut DeviceMemoryBlock<S>;
+            let block_ptr = allocation
+                .allocation_handle
+                .0
+                .cast::<DeviceMemoryBlock<S>>();
 
             // TODO: Maybe do a similar check for dedicated blocks.
             debug_assert!(
-                pool.iter()
-                    .any(|block| &**block as *const DeviceMemoryBlock<S> == block_ptr),
+                pool.iter().any(|block| ptr::addr_of!(**block) == block_ptr),
                 "attempted to deallocate a memory block that does not belong to this allocator",
             );
 
@@ -1605,7 +1608,7 @@ impl<S: Suballocator> DeviceMemoryBlock<S> {
         Ok(MemoryAlloc {
             device_memory: self.device_memory.clone(),
             suballocation: Some(suballocation),
-            allocation_handle: AllocationHandle::from_ptr(self as *mut DeviceMemoryBlock<S> as _),
+            allocation_handle: AllocationHandle::from_ptr(<*mut _>::cast(self)),
         })
     }
 

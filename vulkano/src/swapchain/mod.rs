@@ -80,7 +80,7 @@
 //! # fn build_window() -> Arc<Window> { Arc::new(Window(ptr::null())) }
 //! let window = build_window(); // Third-party function, not provided by vulkano
 //! let _surface = unsafe {
-//!     let hinstance: *mut std::ffi::c_void = ptr::null_mut(); // Windows-specific object
+//!     let hinstance: ash::vk::HINSTANCE = 0; // Windows-specific object
 //!     Surface::from_win32(
 //!         instance.clone(),
 //!         hinstance,
@@ -1056,7 +1056,7 @@ impl Swapchain {
             });
 
             next.p_next = create_info_vk.p_next;
-            create_info_vk.p_next = next as *const _ as *const _;
+            create_info_vk.p_next = <*const _>::cast(next);
         }
 
         if full_screen_exclusive != FullScreenExclusive::Default {
@@ -1066,8 +1066,8 @@ impl Swapchain {
                     ..Default::default()
                 });
 
-            next.p_next = create_info_vk.p_next as *mut _;
-            create_info_vk.p_next = next as *const _ as *const _;
+            next.p_next = create_info_vk.p_next.cast_mut();
+            create_info_vk.p_next = <*const _>::cast(next);
         }
 
         if let Some(Win32Monitor(hmonitor)) = win32_monitor {
@@ -1078,8 +1078,8 @@ impl Swapchain {
                 },
             );
 
-            next.p_next = create_info_vk.p_next as *mut _;
-            create_info_vk.p_next = next as *const _ as *const _;
+            next.p_next = create_info_vk.p_next.cast_mut();
+            create_info_vk.p_next = <*const _>::cast(next);
         }
 
         if !present_modes.is_empty() {
@@ -1091,8 +1091,8 @@ impl Swapchain {
                 ..Default::default()
             });
 
-            next.p_next = create_info_vk.p_next as *mut _;
-            create_info_vk.p_next = next as *const _ as *const _;
+            next.p_next = create_info_vk.p_next.cast_mut();
+            create_info_vk.p_next = <*const _>::cast(next);
         }
 
         if scaling_behavior.is_some() || present_gravity.is_some() {
@@ -1106,8 +1106,8 @@ impl Swapchain {
                     ..Default::default()
                 });
 
-            next.p_next = create_info_vk.p_next as *mut _;
-            create_info_vk.p_next = next as *const _ as *const _;
+            next.p_next = create_info_vk.p_next.cast_mut();
+            create_info_vk.p_next = <*const _>::cast(next);
         }
 
         let fns = device.fns();

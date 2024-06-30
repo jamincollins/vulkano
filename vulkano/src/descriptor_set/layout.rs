@@ -117,6 +117,7 @@ impl DescriptorSetLayout {
                 descriptor_count,
                 stage_flags: stages.into(),
                 p_immutable_samplers: ptr::null(),
+                ..Default::default()
             });
             per_binding_vk.push(PerBinding {
                 immutable_samplers_vk: immutable_samplers
@@ -155,7 +156,7 @@ impl DescriptorSetLayout {
                 });
 
             next.p_next = create_info_vk.p_next;
-            create_info_vk.p_next = next as *const _ as *const _;
+            create_info_vk.p_next = <*const _>::cast(next);
         }
 
         let handle = {
@@ -301,7 +302,7 @@ pub struct DescriptorSetLayoutCreateInfo {
     /// Specifies how to create the descriptor set layout.
     pub flags: DescriptorSetLayoutCreateFlags,
 
-    /// The bindings of the desriptor set layout. These are specified according to binding number.
+    /// The bindings of the descriptor set layout. These are specified according to binding number.
     ///
     /// It is generally advisable to keep the binding numbers low. Higher binding numbers may
     /// use more memory inside Vulkan.

@@ -109,7 +109,7 @@ impl DebugUtilsMessenger {
             message_severity: message_severity.into(),
             message_type: message_type.into(),
             pfn_user_callback: Some(trampoline),
-            p_user_data: user_callback.as_ptr() as *const c_void as *mut _,
+            p_user_data: user_callback.as_ptr().cast_mut().cast(),
             ..Default::default()
         };
 
@@ -305,14 +305,14 @@ impl DebugUtilsMessengerCallback {
     }
 
     pub(crate) fn as_ptr(&self) -> *const CallbackData {
-        &self.0 as _
+        ptr::addr_of!(self.0)
     }
 }
 
 pub(super) unsafe extern "system" fn trampoline(
     message_severity_vk: ash::vk::DebugUtilsMessageSeverityFlagsEXT,
     message_types_vk: ash::vk::DebugUtilsMessageTypeFlagsEXT,
-    callback_data_vk: *const ash::vk::DebugUtilsMessengerCallbackDataEXT,
+    callback_data_vk: *const ash::vk::DebugUtilsMessengerCallbackDataEXT<'_>,
     user_data_vk: *mut c_void,
 ) -> ash::vk::Bool32 {
     // Since we box the closure, the type system doesn't detect that the `UnwindSafe`
@@ -331,6 +331,7 @@ pub(super) unsafe extern "system" fn trampoline(
             p_cmd_buf_labels,
             object_count,
             p_objects,
+            _marker: _,
         } = *callback_data_vk;
 
         let callback_data = DebugUtilsMessengerCallbackData {
@@ -366,7 +367,7 @@ pub(super) unsafe extern "system" fn trampoline(
             ),
         };
 
-        let user_callback = &*(user_data_vk as *mut CallbackData as *const CallbackData);
+        let user_callback: &CallbackData = &*user_data_vk.cast_const().cast();
 
         user_callback(
             message_severity_vk.into(),
@@ -415,23 +416,18 @@ pub struct DebugUtilsMessengerCallbackLabel<'a> {
 }
 
 #[derive(Clone, Debug)]
-pub struct DebugUtilsMessengerCallbackLabelIter<'a>(slice::Iter<'a, ash::vk::DebugUtilsLabelEXT>);
+pub struct DebugUtilsMessengerCallbackLabelIter<'a>(
+    slice::Iter<'a, ash::vk::DebugUtilsLabelEXT<'a>>,
+);
 
 impl<'a> Iterator for DebugUtilsMessengerCallbackLabelIter<'a> {
     type Item = DebugUtilsMessengerCallbackLabel<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.0.next().map(|label| unsafe {
-            let &ash::vk::DebugUtilsLabelEXT {
-                s_type: _,
-                p_next: _,
-                p_label_name,
-                ref color,
-            } = label;
-
             DebugUtilsMessengerCallbackLabel {
-                label_name: CStr::from_ptr(p_label_name).to_str().unwrap(),
-                color,
+                label_name: label.label_name_as_c_str().unwrap().to_str().unwrap(),
+                color: &label.color,
             }
         })
     }
@@ -452,7 +448,7 @@ pub struct DebugUtilsMessengerCallbackObjectNameInfo<'a> {
 
 #[derive(Clone, Debug)]
 pub struct DebugUtilsMessengerCallbackObjectNameInfoIter<'a>(
-    slice::Iter<'a, ash::vk::DebugUtilsObjectNameInfoEXT>,
+    slice::Iter<'a, ash::vk::DebugUtilsObjectNameInfoEXT<'a>>,
 );
 
 impl<'a> Iterator for DebugUtilsMessengerCallbackObjectNameInfoIter<'a> {
@@ -466,6 +462,7 @@ impl<'a> Iterator for DebugUtilsMessengerCallbackObjectNameInfoIter<'a> {
                 object_type,
                 object_handle,
                 p_object_name,
+                _marker: _,
             } = info;
 
             DebugUtilsMessengerCallbackObjectNameInfo {
