@@ -39,6 +39,7 @@ use crate::{
     DebugWrapper, Requires, RequiresAllOf, RequiresOneOf, Validated, ValidationError, Version,
     VulkanError, VulkanObject,
 };
+use ash::vk;
 use std::{
     ffi::{c_void, CStr, CString},
     fmt::{Debug, Error as FmtError, Formatter},
@@ -53,7 +54,7 @@ use std::{
 /// The callback can be called as long as this object is alive.
 #[must_use = "The DebugUtilsMessenger object must be kept alive for as long as you want your callback to be called"]
 pub struct DebugUtilsMessenger {
-    handle: ash::vk::DebugUtilsMessengerEXT,
+    handle: vk::DebugUtilsMessengerEXT,
     instance: DebugWrapper<Arc<Instance>>,
     _user_callback: Arc<DebugUtilsMessengerCallback>,
 }
@@ -100,15 +101,17 @@ impl DebugUtilsMessenger {
         let handle = {
             let fns = instance.fns();
             let mut output = MaybeUninit::uninit();
-            (fns.ext_debug_utils.create_debug_utils_messenger_ext)(
-                instance.handle(),
-                &create_info_vk,
-                ptr::null(),
-                output.as_mut_ptr(),
-            )
+            unsafe {
+                (fns.ext_debug_utils.create_debug_utils_messenger_ext)(
+                    instance.handle(),
+                    &create_info_vk,
+                    ptr::null(),
+                    output.as_mut_ptr(),
+                )
+            }
             .result()
             .map_err(VulkanError::from)?;
-            output.assume_init()
+            unsafe { output.assume_init() }
         };
 
         Ok(DebugUtilsMessenger {
@@ -175,15 +178,22 @@ pub struct DebugUtilsMessengerCreateInfo {
 }
 
 impl DebugUtilsMessengerCreateInfo {
-    /// Returns a `DebugUtilsMessengerCreateInfo` with the specified `user_callback`.
+    /// Returns a default `DebugUtilsMessengerCreateInfo` with the provided `user_callback`.
+    // TODO: make const
     #[inline]
-    pub fn user_callback(user_callback: Arc<DebugUtilsMessengerCallback>) -> Self {
+    pub fn new(user_callback: Arc<DebugUtilsMessengerCallback>) -> Self {
         Self {
             message_severity: DebugUtilsMessageSeverity::ERROR | DebugUtilsMessageSeverity::WARNING,
             message_type: DebugUtilsMessageType::GENERAL,
             user_callback,
             _ne: crate::NonExhaustive(()),
         }
+    }
+
+    #[deprecated(since = "0.36.0", note = "use `new` instead")]
+    #[inline]
+    pub fn user_callback(user_callback: Arc<DebugUtilsMessengerCallback>) -> Self {
+        Self::new(user_callback)
     }
 
     #[inline]
@@ -242,7 +252,7 @@ impl DebugUtilsMessengerCreateInfo {
         Ok(())
     }
 
-    pub(crate) fn to_vk(&self) -> ash::vk::DebugUtilsMessengerCreateInfoEXT<'static> {
+    pub(crate) fn to_vk(&self) -> vk::DebugUtilsMessengerCreateInfoEXT<'static> {
         let &Self {
             message_type,
             message_severity,
@@ -250,8 +260,8 @@ impl DebugUtilsMessengerCreateInfo {
             _ne: _,
         } = self;
 
-        ash::vk::DebugUtilsMessengerCreateInfoEXT::default()
-            .flags(ash::vk::DebugUtilsMessengerCreateFlagsEXT::empty())
+        vk::DebugUtilsMessengerCreateInfoEXT::default()
+            .flags(vk::DebugUtilsMessengerCreateFlagsEXT::empty())
             .message_severity(message_severity.into())
             .message_type(message_type.into())
             .pfn_user_callback(Some(trampoline))
@@ -310,15 +320,15 @@ impl DebugUtilsMessengerCallback {
 }
 
 pub(super) unsafe extern "system" fn trampoline(
-    message_severity_vk: ash::vk::DebugUtilsMessageSeverityFlagsEXT,
-    message_types_vk: ash::vk::DebugUtilsMessageTypeFlagsEXT,
-    callback_data_vk: *const ash::vk::DebugUtilsMessengerCallbackDataEXT<'_>,
+    message_severity_vk: vk::DebugUtilsMessageSeverityFlagsEXT,
+    message_types_vk: vk::DebugUtilsMessageTypeFlagsEXT,
+    callback_data_vk: *const vk::DebugUtilsMessengerCallbackDataEXT<'_>,
     user_data_vk: *mut c_void,
-) -> ash::vk::Bool32 {
+) -> vk::Bool32 {
     // Since we box the closure, the type system doesn't detect that the `UnwindSafe`
     // bound is enforced. Therefore we enforce it manually.
     let _ = catch_unwind(AssertUnwindSafe(move || {
-        let ash::vk::DebugUtilsMessengerCallbackDataEXT {
+        let vk::DebugUtilsMessengerCallbackDataEXT {
             flags: _,
             p_message_id_name,
             message_id_number,
@@ -330,20 +340,22 @@ pub(super) unsafe extern "system" fn trampoline(
             object_count,
             p_objects,
             ..
-        } = *callback_data_vk;
+        } = unsafe { *callback_data_vk };
 
         let callback_data = DebugUtilsMessengerCallbackData {
-            message_id_name: p_message_id_name
-                .as_ref()
-                .map(|p_message_id_name| CStr::from_ptr(p_message_id_name).to_str().unwrap()),
+            message_id_name: unsafe { p_message_id_name.as_ref() }.map(|p_message_id_name| {
+                unsafe { CStr::from_ptr(p_message_id_name) }
+                    .to_str()
+                    .unwrap()
+            }),
             message_id_number,
-            message: CStr::from_ptr(p_message).to_str().unwrap(),
+            message: unsafe { CStr::from_ptr(p_message) }.to_str().unwrap(),
             queue_labels: DebugUtilsMessengerCallbackLabelIter(
                 // Some drivers give a null pointer for empty data.
                 if p_queue_labels.is_null() {
                     &[]
                 } else {
-                    slice::from_raw_parts(p_queue_labels, queue_label_count as usize)
+                    unsafe { slice::from_raw_parts(p_queue_labels, queue_label_count as usize) }
                 }
                 .iter(),
             ),
@@ -351,7 +363,7 @@ pub(super) unsafe extern "system" fn trampoline(
                 if p_cmd_buf_labels.is_null() {
                     &[]
                 } else {
-                    slice::from_raw_parts(p_cmd_buf_labels, cmd_buf_label_count as usize)
+                    unsafe { slice::from_raw_parts(p_cmd_buf_labels, cmd_buf_label_count as usize) }
                 }
                 .iter(),
             ),
@@ -359,13 +371,13 @@ pub(super) unsafe extern "system" fn trampoline(
                 if p_objects.is_null() {
                     &[]
                 } else {
-                    slice::from_raw_parts(p_objects, object_count as usize)
+                    unsafe { slice::from_raw_parts(p_objects, object_count as usize) }
                 }
                 .iter(),
             ),
         };
 
-        let user_callback: &CallbackData = &*user_data_vk.cast_const().cast();
+        let user_callback: &CallbackData = unsafe { &*user_data_vk.cast_const().cast() };
 
         user_callback(
             message_severity_vk.into(),
@@ -374,7 +386,7 @@ pub(super) unsafe extern "system" fn trampoline(
         );
     }));
 
-    ash::vk::FALSE
+    vk::FALSE
 }
 
 /// The data of a message received by the user callback.
@@ -414,9 +426,7 @@ pub struct DebugUtilsMessengerCallbackLabel<'a> {
 }
 
 #[derive(Clone, Debug)]
-pub struct DebugUtilsMessengerCallbackLabelIter<'a>(
-    slice::Iter<'a, ash::vk::DebugUtilsLabelEXT<'a>>,
-);
+pub struct DebugUtilsMessengerCallbackLabelIter<'a>(slice::Iter<'a, vk::DebugUtilsLabelEXT<'a>>);
 
 impl<'a> Iterator for DebugUtilsMessengerCallbackLabelIter<'a> {
     type Item = DebugUtilsMessengerCallbackLabel<'a>;
@@ -436,7 +446,7 @@ impl<'a> Iterator for DebugUtilsMessengerCallbackLabelIter<'a> {
 #[non_exhaustive]
 pub struct DebugUtilsMessengerCallbackObjectNameInfo<'a> {
     /// The type of object.
-    pub object_type: ash::vk::ObjectType,
+    pub object_type: vk::ObjectType,
 
     /// The handle of the object.
     pub object_handle: u64,
@@ -447,7 +457,7 @@ pub struct DebugUtilsMessengerCallbackObjectNameInfo<'a> {
 
 #[derive(Clone, Debug)]
 pub struct DebugUtilsMessengerCallbackObjectNameInfoIter<'a>(
-    slice::Iter<'a, ash::vk::DebugUtilsObjectNameInfoEXT<'a>>,
+    slice::Iter<'a, vk::DebugUtilsObjectNameInfoEXT<'a>>,
 );
 
 impl<'a> Iterator for DebugUtilsMessengerCallbackObjectNameInfoIter<'a> {
@@ -455,7 +465,7 @@ impl<'a> Iterator for DebugUtilsMessengerCallbackObjectNameInfoIter<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         self.0.next().map(|info| {
-            let &ash::vk::DebugUtilsObjectNameInfoEXT {
+            let &vk::DebugUtilsObjectNameInfoEXT {
                 object_type,
                 object_handle,
                 p_object_name,
@@ -533,19 +543,25 @@ pub struct DebugUtilsLabel {
 impl Default for DebugUtilsLabel {
     #[inline]
     fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DebugUtilsLabel {
+    /// Returns a default `DebugUtilsLabel`.
+    #[inline]
+    pub const fn new() -> Self {
         Self {
             label_name: String::new(),
             color: [0.0; 4],
             _ne: crate::NonExhaustive(()),
         }
     }
-}
 
-impl DebugUtilsLabel {
     pub(crate) fn to_vk<'a>(
         &self,
         fields1_vk: &'a DebugUtilsLabelFields1Vk,
-    ) -> ash::vk::DebugUtilsLabelEXT<'a> {
+    ) -> vk::DebugUtilsLabelEXT<'a> {
         let &Self {
             label_name: _,
             color,
@@ -554,7 +570,7 @@ impl DebugUtilsLabel {
 
         let DebugUtilsLabelFields1Vk { label_name_vk } = fields1_vk;
 
-        ash::vk::DebugUtilsLabelEXT::default()
+        vk::DebugUtilsLabelEXT::default()
             .label_name(label_name_vk)
             .color(color)
     }
@@ -679,7 +695,7 @@ mod tests {
                 message_type: DebugUtilsMessageType::GENERAL
                     | DebugUtilsMessageType::VALIDATION
                     | DebugUtilsMessageType::PERFORMANCE,
-                ..DebugUtilsMessengerCreateInfo::user_callback(unsafe {
+                ..DebugUtilsMessengerCreateInfo::new(unsafe {
                     DebugUtilsMessengerCallback::new(|_, _, _| {})
                 })
             },

@@ -94,18 +94,18 @@ use self::allocator::{
 };
 pub use self::{alignment::*, device_memory::*};
 use crate::{
-    buffer::{sys::RawBuffer, Subbuffer},
+    buffer::sys::RawBuffer,
     device::{Device, DeviceOwned, DeviceOwnedDebugWrapper},
-    image::{sys::RawImage, Image, ImageAspects},
+    image::sys::RawImage,
     macros::vulkan_bitflags,
-    sync::{semaphore::Semaphore, HostAccessError},
+    sync::HostAccessError,
     DeviceSize, Validated, ValidationError, Version, VulkanError, VulkanObject,
 };
-use smallvec::SmallVec;
+use ash::vk;
 use std::{
     cmp,
     mem::ManuallyDrop,
-    num::NonZeroU64,
+    num::NonZero,
     ops::{Bound, Range, RangeBounds, RangeTo},
     ptr::NonNull,
     sync::Arc,
@@ -114,6 +114,7 @@ use std::{
 mod alignment;
 pub mod allocator;
 mod device_memory;
+pub mod sparse;
 
 /// Memory that can be bound to resources.
 ///
@@ -351,8 +352,10 @@ impl ResourceMemory {
     ) -> Result<(), Validated<VulkanError>> {
         self.validate_memory_range(&memory_range)?;
 
-        self.device_memory()
-            .invalidate_range(self.create_memory_range(memory_range))
+        unsafe {
+            self.device_memory()
+                .invalidate_range(self.create_memory_range(memory_range))
+        }
     }
 
     #[cfg_attr(not(feature = "document_unchecked"), doc(hidden))]
@@ -361,8 +364,10 @@ impl ResourceMemory {
         &self,
         memory_range: MappedMemoryRange,
     ) -> Result<(), VulkanError> {
-        self.device_memory()
-            .invalidate_range_unchecked(self.create_memory_range(memory_range))
+        unsafe {
+            self.device_memory()
+                .invalidate_range_unchecked(self.create_memory_range(memory_range))
+        }
     }
 
     /// Flushes the host cache for a range of the `ResourceMemory`.
@@ -385,8 +390,10 @@ impl ResourceMemory {
     ) -> Result<(), Validated<VulkanError>> {
         self.validate_memory_range(&memory_range)?;
 
-        self.device_memory()
-            .flush_range(self.create_memory_range(memory_range))
+        unsafe {
+            self.device_memory()
+                .flush_range(self.create_memory_range(memory_range))
+        }
     }
 
     #[cfg_attr(not(feature = "document_unchecked"), doc(hidden))]
@@ -395,8 +402,10 @@ impl ResourceMemory {
         &self,
         memory_range: MappedMemoryRange,
     ) -> Result<(), VulkanError> {
-        self.device_memory()
-            .flush_range_unchecked(self.create_memory_range(memory_range))
+        unsafe {
+            self.device_memory()
+                .flush_range_unchecked(self.create_memory_range(memory_range))
+        }
     }
 
     fn validate_memory_range(
@@ -452,15 +461,15 @@ impl ResourceMemory {
 
     pub(crate) fn to_vk_bind_buffer_memory_info(
         &self,
-        buffer_vk: ash::vk::Buffer,
-    ) -> ash::vk::BindBufferMemoryInfo<'static> {
+        buffer_vk: vk::Buffer,
+    ) -> vk::BindBufferMemoryInfo<'static> {
         let &Self {
             ref device_memory,
             offset,
             ..
         } = self;
 
-        ash::vk::BindBufferMemoryInfo::default()
+        vk::BindBufferMemoryInfo::default()
             .buffer(buffer_vk)
             .memory(device_memory.handle())
             .memory_offset(offset)
@@ -468,15 +477,15 @@ impl ResourceMemory {
 
     pub(crate) fn to_vk_bind_image_memory_info(
         &self,
-        image_vk: ash::vk::Image,
-    ) -> ash::vk::BindImageMemoryInfo<'static> {
+        image_vk: vk::Image,
+    ) -> vk::BindImageMemoryInfo<'static> {
         let &Self {
             ref device_memory,
             offset,
             ..
         } = self;
 
-        ash::vk::BindImageMemoryInfo::default()
+        vk::BindImageMemoryInfo::default()
             .image(image_vk)
             .memory(device_memory.handle())
             .memory_offset(offset)
@@ -520,12 +529,12 @@ pub struct MemoryProperties {
 }
 
 impl MemoryProperties {
-    pub(crate) fn to_mut_vk2() -> ash::vk::PhysicalDeviceMemoryProperties2KHR<'static> {
-        ash::vk::PhysicalDeviceMemoryProperties2KHR::default()
+    pub(crate) fn to_mut_vk2() -> vk::PhysicalDeviceMemoryProperties2KHR<'static> {
+        vk::PhysicalDeviceMemoryProperties2KHR::default()
     }
 
-    pub(crate) fn from_vk2(val_vk: &ash::vk::PhysicalDeviceMemoryProperties2<'_>) -> Self {
-        let &ash::vk::PhysicalDeviceMemoryProperties2 {
+    pub(crate) fn from_vk2(val_vk: &vk::PhysicalDeviceMemoryProperties2<'_>) -> Self {
+        let &vk::PhysicalDeviceMemoryProperties2 {
             ref memory_properties,
             ..
         } = val_vk;
@@ -533,7 +542,7 @@ impl MemoryProperties {
         Self::from_vk(memory_properties)
     }
 
-    pub(crate) fn from_vk(val_vk: &ash::vk::PhysicalDeviceMemoryProperties) -> Self {
+    pub(crate) fn from_vk(val_vk: &vk::PhysicalDeviceMemoryProperties) -> Self {
         let memory_types_vk = val_vk.memory_types_as_slice();
         let memory_heaps_vk = val_vk.memory_heaps_as_slice();
 
@@ -557,8 +566,8 @@ pub struct MemoryType {
 
 impl MemoryType {
     #[allow(clippy::trivially_copy_pass_by_ref)]
-    pub(crate) fn from_vk(val_vk: &ash::vk::MemoryType) -> Self {
-        let &ash::vk::MemoryType {
+    pub(crate) fn from_vk(val_vk: &vk::MemoryType) -> Self {
+        let &vk::MemoryType {
             property_flags,
             heap_index,
         } = val_vk;
@@ -702,8 +711,8 @@ pub struct MemoryHeap {
 }
 
 impl MemoryHeap {
-    pub(crate) fn from_vk(val_vk: &ash::vk::MemoryHeap) -> Self {
-        let &ash::vk::MemoryHeap { size, flags } = val_vk;
+    pub(crate) fn from_vk(val_vk: &vk::MemoryHeap) -> Self {
+        let &vk::MemoryHeap { size, flags } = val_vk;
 
         Self {
             size,
@@ -759,8 +768,8 @@ pub struct MemoryRequirements {
 impl MemoryRequirements {
     pub(crate) fn to_mut_vk2(
         extensions_vk: &mut MemoryRequirements2ExtensionsVk,
-    ) -> ash::vk::MemoryRequirements2<'_> {
-        let mut val_vk = ash::vk::MemoryRequirements2::default();
+    ) -> vk::MemoryRequirements2<'_> {
+        let mut val_vk = vk::MemoryRequirements2::default();
 
         let MemoryRequirements2ExtensionsVk { dedicated_vk } = extensions_vk;
 
@@ -780,19 +789,19 @@ impl MemoryRequirements {
                         || device.enabled_extensions().khr_get_memory_requirements2
                 );
 
-                ash::vk::MemoryDedicatedRequirements::default()
+                vk::MemoryDedicatedRequirements::default()
             });
 
         MemoryRequirements2ExtensionsVk { dedicated_vk }
     }
 
     pub(crate) fn from_vk2(
-        val_vk: &ash::vk::MemoryRequirements2<'_>,
+        val_vk: &vk::MemoryRequirements2<'_>,
         extensions_vk: &MemoryRequirements2ExtensionsVk,
     ) -> Self {
-        let &ash::vk::MemoryRequirements2 {
+        let &vk::MemoryRequirements2 {
             memory_requirements:
-                ash::vk::MemoryRequirements {
+                vk::MemoryRequirements {
                     size,
                     alignment,
                     memory_type_bits,
@@ -810,7 +819,7 @@ impl MemoryRequirements {
         let MemoryRequirements2ExtensionsVk { dedicated_vk } = extensions_vk;
 
         if let Some(val_vk) = dedicated_vk {
-            let &ash::vk::MemoryDedicatedRequirements {
+            let &vk::MemoryDedicatedRequirements {
                 prefers_dedicated_allocation,
                 requires_dedicated_allocation,
                 ..
@@ -828,7 +837,7 @@ impl MemoryRequirements {
 }
 
 pub(crate) struct MemoryRequirements2ExtensionsVk {
-    pub(crate) dedicated_vk: Option<ash::vk::MemoryDedicatedRequirements<'static>>,
+    pub(crate) dedicated_vk: Option<vk::MemoryDedicatedRequirements<'static>>,
 }
 
 /// Indicates a specific resource to allocate memory for.
@@ -849,8 +858,8 @@ pub enum DedicatedAllocation<'a> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DedicatedTo {
-    Buffer(NonZeroU64),
-    Image(NonZeroU64),
+    Buffer(NonZero<u64>),
+    Image(NonZero<u64>),
 }
 
 impl From<DedicatedAllocation<'_>> for DedicatedTo {
@@ -888,8 +897,8 @@ pub struct ExternalMemoryProperties {
 }
 
 impl ExternalMemoryProperties {
-    pub(crate) fn from_vk(val_vk: &ash::vk::ExternalMemoryProperties) -> Self {
-        let &ash::vk::ExternalMemoryProperties {
+    pub(crate) fn from_vk(val_vk: &vk::ExternalMemoryProperties) -> Self {
+        let &vk::ExternalMemoryProperties {
             external_memory_features,
             export_from_imported_handle_types,
             compatible_handle_types,
@@ -897,11 +906,11 @@ impl ExternalMemoryProperties {
 
         Self {
             dedicated_only: external_memory_features
-                .intersects(ash::vk::ExternalMemoryFeatureFlags::DEDICATED_ONLY),
+                .intersects(vk::ExternalMemoryFeatureFlags::DEDICATED_ONLY),
             exportable: external_memory_features
-                .intersects(ash::vk::ExternalMemoryFeatureFlags::EXPORTABLE),
+                .intersects(vk::ExternalMemoryFeatureFlags::EXPORTABLE),
             importable: external_memory_features
-                .intersects(ash::vk::ExternalMemoryFeatureFlags::IMPORTABLE),
+                .intersects(vk::ExternalMemoryFeatureFlags::IMPORTABLE),
             export_from_imported_handle_types: export_from_imported_handle_types.into(),
             compatible_handle_types: compatible_handle_types.into(),
         }
@@ -917,421 +926,16 @@ pub struct MemoryFdProperties {
 }
 
 impl MemoryFdProperties {
-    pub(crate) fn to_mut_vk() -> ash::vk::MemoryFdPropertiesKHR<'static> {
-        ash::vk::MemoryFdPropertiesKHR::default()
+    pub(crate) fn to_mut_vk() -> vk::MemoryFdPropertiesKHR<'static> {
+        vk::MemoryFdPropertiesKHR::default()
     }
 
-    pub(crate) fn from_vk(val_vk: &ash::vk::MemoryFdPropertiesKHR<'_>) -> Self {
-        let &ash::vk::MemoryFdPropertiesKHR {
+    pub(crate) fn from_vk(val_vk: &vk::MemoryFdPropertiesKHR<'_>) -> Self {
+        let &vk::MemoryFdPropertiesKHR {
             memory_type_bits, ..
         } = val_vk;
 
         Self { memory_type_bits }
-    }
-}
-
-/// Parameters to execute sparse bind operations on a queue.
-#[derive(Clone, Debug)]
-pub struct BindSparseInfo {
-    /// The semaphores to wait for before beginning the execution of this batch of
-    /// sparse bind operations.
-    ///
-    /// The default value is empty.
-    pub wait_semaphores: Vec<Arc<Semaphore>>,
-
-    /// The bind operations to perform for buffers.
-    ///
-    /// The default value is empty.
-    pub buffer_binds: Vec<(Subbuffer<[u8]>, Vec<SparseBufferMemoryBind>)>,
-
-    /// The bind operations to perform for images with an opaque memory layout.
-    ///
-    /// This should be used for mip tail regions, the metadata aspect, and for the normal regions
-    /// of images that do not have the `sparse_residency` flag set.
-    ///
-    /// The default value is empty.
-    pub image_opaque_binds: Vec<(Arc<Image>, Vec<SparseImageOpaqueMemoryBind>)>,
-
-    /// The bind operations to perform for images with a known memory layout.
-    ///
-    /// This type of sparse bind can only be used for images that have the `sparse_residency`
-    /// flag set.
-    /// Only the normal texel regions can be bound this way, not the mip tail regions or metadata
-    /// aspect.
-    ///
-    /// The default value is empty.
-    pub image_binds: Vec<(Arc<Image>, Vec<SparseImageMemoryBind>)>,
-
-    /// The semaphores to signal after the execution of this batch of sparse bind operations
-    /// has completed.
-    ///
-    /// The default value is empty.
-    pub signal_semaphores: Vec<Arc<Semaphore>>,
-
-    pub _ne: crate::NonExhaustive,
-}
-
-impl Default for BindSparseInfo {
-    #[inline]
-    fn default() -> Self {
-        Self {
-            wait_semaphores: Vec::new(),
-            buffer_binds: Vec::new(),
-            image_opaque_binds: Vec::new(),
-            image_binds: Vec::new(),
-            signal_semaphores: Vec::new(),
-            _ne: crate::NonExhaustive(()),
-        }
-    }
-}
-
-impl BindSparseInfo {
-    pub(crate) fn to_vk<'a>(
-        &self,
-        fields1_vk: &'a BindSparseInfoFields1Vk<'_>,
-    ) -> ash::vk::BindSparseInfo<'a> {
-        let BindSparseInfoFields1Vk {
-            wait_semaphores_vk,
-            buffer_bind_infos_vk,
-            image_opaque_bind_infos_vk,
-            image_bind_infos_vk,
-            signal_semaphores_vk,
-        } = fields1_vk;
-
-        ash::vk::BindSparseInfo::default()
-            .wait_semaphores(wait_semaphores_vk)
-            .buffer_binds(buffer_bind_infos_vk)
-            .image_opaque_binds(image_opaque_bind_infos_vk)
-            .image_binds(image_bind_infos_vk)
-            .signal_semaphores(signal_semaphores_vk)
-    }
-
-    pub(crate) fn to_vk_fields1<'a>(
-        &self,
-        fields2_vk: &'a BindSparseInfoFields2Vk,
-    ) -> BindSparseInfoFields1Vk<'a> {
-        let &BindSparseInfo {
-            ref wait_semaphores,
-            ref buffer_binds,
-            ref image_opaque_binds,
-            ref image_binds,
-            ref signal_semaphores,
-            _ne: _,
-        } = self;
-        let BindSparseInfoFields2Vk {
-            buffer_binds_vk,
-            image_opaque_binds_vk,
-            image_binds_vk,
-        } = fields2_vk;
-
-        let wait_semaphores_vk = wait_semaphores
-            .iter()
-            .map(|semaphore| semaphore.handle())
-            .collect();
-
-        let buffer_bind_infos_vk = buffer_binds
-            .iter()
-            .zip(buffer_binds_vk)
-            .map(|((buffer, _), buffer_binds_vk)| {
-                ash::vk::SparseBufferMemoryBindInfo::default()
-                    .buffer(buffer.buffer().handle())
-                    .binds(buffer_binds_vk)
-            })
-            .collect();
-
-        let image_opaque_bind_infos_vk = image_opaque_binds
-            .iter()
-            .zip(image_opaque_binds_vk)
-            .map(|((image, _), image_opaque_binds_vk)| {
-                ash::vk::SparseImageOpaqueMemoryBindInfo::default()
-                    .image(image.handle())
-                    .binds(image_opaque_binds_vk)
-            })
-            .collect();
-
-        let image_bind_infos_vk = image_binds
-            .iter()
-            .zip(image_binds_vk)
-            .map(|((image, _), image_binds_vk)| {
-                ash::vk::SparseImageMemoryBindInfo::default()
-                    .image(image.handle())
-                    .binds(image_binds_vk)
-            })
-            .collect();
-
-        let signal_semaphores_vk = signal_semaphores
-            .iter()
-            .map(|semaphore| semaphore.handle())
-            .collect();
-
-        BindSparseInfoFields1Vk {
-            wait_semaphores_vk,
-            buffer_bind_infos_vk,
-            image_opaque_bind_infos_vk,
-            image_bind_infos_vk,
-            signal_semaphores_vk,
-        }
-    }
-
-    pub(crate) fn to_vk_fields2(&self) -> BindSparseInfoFields2Vk {
-        let &Self {
-            wait_semaphores: _,
-            ref buffer_binds,
-            ref image_opaque_binds,
-            ref image_binds,
-            signal_semaphores: _,
-            _ne: _,
-        } = self;
-
-        let buffer_binds_vk = buffer_binds
-            .iter()
-            .map(|(_, memory_binds)| {
-                memory_binds
-                    .iter()
-                    .map(SparseBufferMemoryBind::to_vk)
-                    .collect()
-            })
-            .collect();
-
-        let image_opaque_binds_vk = image_opaque_binds
-            .iter()
-            .map(|(_, memory_binds)| {
-                memory_binds
-                    .iter()
-                    .map(SparseImageOpaqueMemoryBind::to_vk)
-                    .collect()
-            })
-            .collect();
-
-        let image_binds_vk = image_binds
-            .iter()
-            .map(|(_, memory_binds)| {
-                memory_binds
-                    .iter()
-                    .map(SparseImageMemoryBind::to_vk)
-                    .collect()
-            })
-            .collect();
-
-        BindSparseInfoFields2Vk {
-            buffer_binds_vk,
-            image_opaque_binds_vk,
-            image_binds_vk,
-        }
-    }
-}
-
-pub(crate) struct BindSparseInfoFields1Vk<'a> {
-    pub(crate) wait_semaphores_vk: SmallVec<[ash::vk::Semaphore; 4]>,
-    pub(crate) buffer_bind_infos_vk: SmallVec<[ash::vk::SparseBufferMemoryBindInfo<'a>; 4]>,
-    pub(crate) image_opaque_bind_infos_vk:
-        SmallVec<[ash::vk::SparseImageOpaqueMemoryBindInfo<'a>; 4]>,
-    pub(crate) image_bind_infos_vk: SmallVec<[ash::vk::SparseImageMemoryBindInfo<'a>; 4]>,
-    pub(crate) signal_semaphores_vk: SmallVec<[ash::vk::Semaphore; 4]>,
-}
-
-pub(crate) struct BindSparseInfoFields2Vk {
-    pub(crate) buffer_binds_vk: SmallVec<[SmallVec<[ash::vk::SparseMemoryBind; 4]>; 4]>,
-    pub(crate) image_opaque_binds_vk: SmallVec<[SmallVec<[ash::vk::SparseMemoryBind; 4]>; 4]>,
-    pub(crate) image_binds_vk: SmallVec<[SmallVec<[ash::vk::SparseImageMemoryBind; 4]>; 4]>,
-}
-
-/// Parameters for a single sparse bind operation on a buffer.
-#[derive(Clone, Debug, Default)]
-pub struct SparseBufferMemoryBind {
-    /// The offset in bytes from the start of the buffer's memory, where memory is to be (un)bound.
-    ///
-    /// The default value is `0`.
-    pub offset: DeviceSize,
-
-    /// The size in bytes of the memory to be (un)bound.
-    ///
-    /// The default value is `0`, which must be overridden.
-    pub size: DeviceSize,
-
-    /// If `Some`, specifies the memory and an offset into that memory that is to be bound.
-    /// The provided memory must match the buffer's memory requirements.
-    ///
-    /// If `None`, specifies that existing memory at the specified location is to be unbound.
-    ///
-    /// The default value is `None`.
-    pub memory: Option<(Arc<DeviceMemory>, DeviceSize)>,
-}
-
-impl SparseBufferMemoryBind {
-    pub(crate) fn to_vk(&self) -> ash::vk::SparseMemoryBind {
-        let &Self {
-            offset,
-            size,
-            ref memory,
-        } = self;
-
-        let (memory, memory_offset) = memory
-            .as_ref()
-            .map_or_else(Default::default, |(memory, memory_offset)| {
-                (memory.handle(), *memory_offset)
-            });
-
-        ash::vk::SparseMemoryBind {
-            resource_offset: offset,
-            size,
-            memory,
-            memory_offset,
-            flags: ash::vk::SparseMemoryBindFlags::empty(),
-        }
-    }
-}
-
-/// Parameters for a single sparse bind operation on parts of an image with an opaque memory
-/// layout.
-///
-/// This type of sparse bind should be used for mip tail regions, the metadata aspect, and for the
-/// normal regions of images that do not have the `sparse_residency` flag set.
-#[derive(Clone, Debug, Default)]
-pub struct SparseImageOpaqueMemoryBind {
-    /// The offset in bytes from the start of the image's memory, where memory is to be (un)bound.
-    ///
-    /// The default value is `0`.
-    pub offset: DeviceSize,
-
-    /// The size in bytes of the memory to be (un)bound.
-    ///
-    /// The default value is `0`, which must be overridden.
-    pub size: DeviceSize,
-
-    /// If `Some`, specifies the memory and an offset into that memory that is to be bound.
-    /// The provided memory must match the image's memory requirements.
-    ///
-    /// If `None`, specifies that existing memory at the specified location is to be unbound.
-    ///
-    /// The default value is `None`.
-    pub memory: Option<(Arc<DeviceMemory>, DeviceSize)>,
-
-    /// Sets whether the binding should apply to the metadata aspect of the image, or to the
-    /// normal texel data.
-    ///
-    /// The default value is `false`.
-    pub metadata: bool,
-}
-
-impl SparseImageOpaqueMemoryBind {
-    pub(crate) fn to_vk(&self) -> ash::vk::SparseMemoryBind {
-        let &Self {
-            offset,
-            size,
-            ref memory,
-            metadata,
-        } = self;
-
-        let (memory, memory_offset) = memory
-            .as_ref()
-            .map_or_else(Default::default, |(memory, memory_offset)| {
-                (memory.handle(), *memory_offset)
-            });
-
-        ash::vk::SparseMemoryBind {
-            resource_offset: offset,
-            size,
-            memory,
-            memory_offset,
-            flags: if metadata {
-                ash::vk::SparseMemoryBindFlags::METADATA
-            } else {
-                ash::vk::SparseMemoryBindFlags::empty()
-            },
-        }
-    }
-}
-
-/// Parameters for a single sparse bind operation on parts of an image with a known memory layout.
-///
-/// This type of sparse bind can only be used for images that have the `sparse_residency` flag set.
-/// Only the normal texel regions can be bound this way, not the mip tail regions or metadata
-/// aspect.
-#[derive(Clone, Debug, Default)]
-pub struct SparseImageMemoryBind {
-    /// The aspects of the image where memory is to be (un)bound.
-    ///
-    /// The default value is `ImageAspects::empty()`, which must be overridden.
-    pub aspects: ImageAspects,
-
-    /// The mip level of the image where memory is to be (un)bound.
-    ///
-    /// The default value is `0`.
-    pub mip_level: u32,
-
-    /// The array layer of the image where memory is to be (un)bound.
-    ///
-    /// The default value is `0`.
-    pub array_layer: u32,
-
-    /// The offset in texels (or for compressed images, texel blocks) from the origin of the image,
-    /// where memory is to be (un)bound.
-    ///
-    /// This must be a multiple of the
-    /// [`SparseImageFormatProperties::image_granularity`](crate::image::SparseImageFormatProperties::image_granularity)
-    /// value of the image.
-    ///
-    /// The default value is `[0; 3]`.
-    pub offset: [u32; 3],
-
-    /// The extent in texels (or for compressed images, texel blocks) of the image where
-    /// memory is to be (un)bound.
-    ///
-    /// This must be a multiple of the
-    /// [`SparseImageFormatProperties::image_granularity`](crate::image::SparseImageFormatProperties::image_granularity)
-    /// value of the image, or `offset + extent` for that dimension must equal the image's total
-    /// extent.
-    ///
-    /// The default value is `[0; 3]`, which must be overridden.
-    pub extent: [u32; 3],
-
-    /// If `Some`, specifies the memory and an offset into that memory that is to be bound.
-    /// The provided memory must match the image's memory requirements.
-    ///
-    /// If `None`, specifies that existing memory at the specified location is to be unbound.
-    ///
-    /// The default value is `None`.
-    pub memory: Option<(Arc<DeviceMemory>, DeviceSize)>,
-}
-
-impl SparseImageMemoryBind {
-    pub(crate) fn to_vk(&self) -> ash::vk::SparseImageMemoryBind {
-        let &Self {
-            aspects,
-            mip_level,
-            array_layer,
-            offset,
-            extent,
-            ref memory,
-        } = self;
-
-        let (memory, memory_offset) = memory
-            .as_ref()
-            .map_or_else(Default::default, |(memory, memory_offset)| {
-                (memory.handle(), *memory_offset)
-            });
-
-        ash::vk::SparseImageMemoryBind {
-            subresource: ash::vk::ImageSubresource {
-                aspect_mask: aspects.into(),
-                mip_level,
-                array_layer,
-            },
-            offset: ash::vk::Offset3D {
-                x: offset[0] as i32,
-                y: offset[1] as i32,
-                z: offset[2] as i32,
-            },
-            extent: ash::vk::Extent3D {
-                width: extent[0],
-                height: extent[1],
-                depth: extent[2],
-            },
-            memory,
-            memory_offset,
-            flags: ash::vk::SparseMemoryBindFlags::empty(),
-        }
     }
 }
 

@@ -32,12 +32,13 @@ use crate::{
     Requires, RequiresAllOf, RequiresOneOf, Validated, ValidationError, Version, VulkanError,
     VulkanObject,
 };
+use ash::vk;
 use smallvec::SmallVec;
 use std::{
     fs::File,
     future::Future,
     mem::MaybeUninit,
-    num::NonZeroU64,
+    num::NonZero,
     pin::Pin,
     ptr,
     sync::Arc,
@@ -49,9 +50,9 @@ use std::{
 /// host.
 #[derive(Debug)]
 pub struct Fence {
-    handle: ash::vk::Fence,
+    handle: vk::Fence,
     device: InstanceOwnedDebugWrapper<Arc<Device>>,
-    id: NonZeroU64,
+    id: NonZero<u64>,
 
     flags: FenceCreateFlags,
     export_handle_types: ExternalFenceHandleTypes,
@@ -93,19 +94,21 @@ impl Fence {
         let handle = {
             let fns = device.fns();
             let mut output = MaybeUninit::uninit();
-            (fns.v1_0.create_fence)(
-                device.handle(),
-                &create_info_vk,
-                ptr::null(),
-                output.as_mut_ptr(),
-            )
-            .result()
+            unsafe {
+                (fns.v1_0.create_fence)(
+                    device.handle(),
+                    &create_info_vk,
+                    ptr::null(),
+                    output.as_mut_ptr(),
+                )
+                .result()
+            }
             .map_err(VulkanError::from)?;
 
-            output.assume_init()
+            unsafe { output.assume_init() }
         };
 
-        Ok(Self::from_handle(device, handle, create_info))
+        Ok(unsafe { Self::from_handle(device, handle, create_info) })
     }
 
     /// Takes a fence from the vulkano-provided fence pool.
@@ -157,7 +160,7 @@ impl Fence {
     #[inline]
     pub unsafe fn from_handle(
         device: Arc<Device>,
-        handle: ash::vk::Fence,
+        handle: vk::Fence,
         create_info: FenceCreateInfo,
     ) -> Fence {
         let FenceCreateInfo {
@@ -196,8 +199,8 @@ impl Fence {
         let fns = self.device.fns();
         let result = unsafe { (fns.v1_0.get_fence_status)(self.device.handle(), self.handle) };
         match result {
-            ash::vk::Result::SUCCESS => Ok(true),
-            ash::vk::Result::NOT_READY => Ok(false),
+            vk::Result::SUCCESS => Ok(true),
+            vk::Result::NOT_READY => Ok(false),
             err => Err(VulkanError::from(err)),
         }
     }
@@ -215,17 +218,11 @@ impl Fence {
 
         let fns = self.device.fns();
         let result = unsafe {
-            (fns.v1_0.wait_for_fences)(
-                self.device.handle(),
-                1,
-                &self.handle,
-                ash::vk::TRUE,
-                timeout_ns,
-            )
+            (fns.v1_0.wait_for_fences)(self.device.handle(), 1, &self.handle, vk::TRUE, timeout_ns)
         };
 
         match result {
-            ash::vk::Result::SUCCESS => Ok(()),
+            vk::Result::SUCCESS => Ok(()),
             err => Err(VulkanError::from(err)),
         }
     }
@@ -293,17 +290,19 @@ impl Fence {
 
         let result = {
             let fns = device.fns();
-            (fns.v1_0.wait_for_fences)(
-                device.handle(),
-                fences_vk.len() as u32,
-                fences_vk.as_ptr(),
-                ash::vk::TRUE, // TODO: let the user choose false here?
-                timeout_ns,
-            )
+            unsafe {
+                (fns.v1_0.wait_for_fences)(
+                    device.handle(),
+                    fences_vk.len() as u32,
+                    fences_vk.as_ptr(),
+                    vk::TRUE, // TODO: let the user choose false here?
+                    timeout_ns,
+                )
+            }
         };
 
         match result {
-            ash::vk::Result::SUCCESS => Ok(()),
+            vk::Result::SUCCESS => Ok(()),
             err => Err(VulkanError::from(err)),
         }
     }
@@ -327,7 +326,7 @@ impl Fence {
     #[cfg_attr(not(feature = "document_unchecked"), doc(hidden))]
     pub unsafe fn reset_unchecked(&self) -> Result<(), VulkanError> {
         let fns = self.device.fns();
-        (fns.v1_0.reset_fences)(self.device.handle(), 1, &self.handle)
+        unsafe { (fns.v1_0.reset_fences)(self.device.handle(), 1, &self.handle) }
             .result()
             .map_err(VulkanError::from)?;
 
@@ -377,9 +376,11 @@ impl Fence {
         let fences_vk: SmallVec<[_; 8]> = fences.iter().map(|fence| fence.handle).collect();
 
         let fns = device.fns();
-        (fns.v1_0.reset_fences)(device.handle(), fences_vk.len() as u32, fences_vk.as_ptr())
-            .result()
-            .map_err(VulkanError::from)?;
+        unsafe {
+            (fns.v1_0.reset_fences)(device.handle(), fences_vk.len() as u32, fences_vk.as_ptr())
+        }
+        .result()
+        .map_err(VulkanError::from)?;
 
         Ok(())
     }
@@ -454,24 +455,27 @@ impl Fence {
         &self,
         handle_type: ExternalFenceHandleType,
     ) -> Result<File, VulkanError> {
-        let info_vk = ash::vk::FenceGetFdInfoKHR::default()
+        let info_vk = vk::FenceGetFdInfoKHR::default()
             .fence(self.handle)
             .handle_type(handle_type.into());
 
         let mut output = MaybeUninit::uninit();
         let fns = self.device.fns();
-        (fns.khr_external_fence_fd.get_fence_fd_khr)(
-            self.device.handle(),
-            &info_vk,
-            output.as_mut_ptr(),
-        )
+        unsafe {
+            (fns.khr_external_fence_fd.get_fence_fd_khr)(
+                self.device.handle(),
+                &info_vk,
+                output.as_mut_ptr(),
+            )
+        }
         .result()
         .map_err(VulkanError::from)?;
 
         #[cfg(unix)]
         {
             use std::os::unix::io::FromRawFd;
-            Ok(File::from_raw_fd(output.assume_init()))
+            let raw_fd = unsafe { output.assume_init() };
+            Ok(unsafe { File::from_raw_fd(raw_fd) })
         }
 
         #[cfg(not(unix))]
@@ -499,7 +503,7 @@ impl Fence {
     pub fn export_win32_handle(
         &self,
         handle_type: ExternalFenceHandleType,
-    ) -> Result<ash::vk::HANDLE, Validated<VulkanError>> {
+    ) -> Result<vk::HANDLE, Validated<VulkanError>> {
         self.validate_export_win32_handle(handle_type)?;
 
         Ok(unsafe { self.export_win32_handle_unchecked(handle_type) }?)
@@ -552,22 +556,27 @@ impl Fence {
     pub unsafe fn export_win32_handle_unchecked(
         &self,
         handle_type: ExternalFenceHandleType,
-    ) -> Result<ash::vk::HANDLE, VulkanError> {
-        let info_vk = ash::vk::FenceGetWin32HandleInfoKHR::default()
+    ) -> Result<vk::HANDLE, VulkanError> {
+        let info_vk = vk::FenceGetWin32HandleInfoKHR::default()
             .fence(self.handle)
             .handle_type(handle_type.into());
 
-        let mut output = MaybeUninit::uninit();
-        let fns = self.device.fns();
-        (fns.khr_external_fence_win32.get_fence_win32_handle_khr)(
-            self.device.handle(),
-            &info_vk,
-            output.as_mut_ptr(),
-        )
-        .result()
-        .map_err(VulkanError::from)?;
+        let handle = {
+            let mut output = MaybeUninit::uninit();
+            let fns = self.device.fns();
+            unsafe {
+                (fns.khr_external_fence_win32.get_fence_win32_handle_khr)(
+                    self.device.handle(),
+                    &info_vk,
+                    output.as_mut_ptr(),
+                )
+            }
+            .result()
+            .map_err(VulkanError::from)?;
+            unsafe { output.assume_init() }
+        };
 
-        Ok(output.assume_init())
+        Ok(handle)
     }
 
     /// Imports a fence from a POSIX file descriptor.
@@ -588,7 +597,7 @@ impl Fence {
     ) -> Result<(), Validated<VulkanError>> {
         self.validate_import_fd(&import_fence_fd_info)?;
 
-        Ok(self.import_fd_unchecked(import_fence_fd_info)?)
+        Ok(unsafe { self.import_fd_unchecked(import_fence_fd_info) }?)
     }
 
     fn validate_import_fd(
@@ -619,7 +628,7 @@ impl Fence {
         let info_vk = import_fence_fd_info.into_vk(self.handle());
 
         let fns = self.device.fns();
-        (fns.khr_external_fence_fd.import_fence_fd_khr)(self.device.handle(), &info_vk)
+        unsafe { (fns.khr_external_fence_fd.import_fence_fd_khr)(self.device.handle(), &info_vk) }
             .result()
             .map_err(VulkanError::from)?;
 
@@ -644,7 +653,7 @@ impl Fence {
     ) -> Result<(), Validated<VulkanError>> {
         self.validate_import_win32_handle(&import_fence_win32_handle_info)?;
 
-        Ok(self.import_win32_handle_unchecked(import_fence_win32_handle_info)?)
+        Ok(unsafe { self.import_win32_handle_unchecked(import_fence_win32_handle_info) }?)
     }
 
     fn validate_import_win32_handle(
@@ -675,10 +684,12 @@ impl Fence {
         let info_vk = import_fence_win32_handle_info.to_vk(self.handle());
 
         let fns = self.device.fns();
-        (fns.khr_external_fence_win32.import_fence_win32_handle_khr)(
-            self.device.handle(),
-            &info_vk,
-        )
+        unsafe {
+            (fns.khr_external_fence_win32.import_fence_win32_handle_khr)(
+                self.device.handle(),
+                &info_vk,
+            )
+        }
         .result()
         .map_err(VulkanError::from)?;
 
@@ -729,7 +740,7 @@ impl Future for Fence {
 }
 
 unsafe impl VulkanObject for Fence {
-    type Handle = ash::vk::Fence;
+    type Handle = vk::Fence;
 
     #[inline]
     fn handle(&self) -> Self::Handle {
@@ -763,15 +774,21 @@ pub struct FenceCreateInfo {
 impl Default for FenceCreateInfo {
     #[inline]
     fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FenceCreateInfo {
+    /// Returns a default `FenceCreateInfo`.
+    #[inline]
+    pub const fn new() -> Self {
         Self {
             flags: FenceCreateFlags::empty(),
             export_handle_types: ExternalFenceHandleTypes::empty(),
             _ne: crate::NonExhaustive(()),
         }
     }
-}
 
-impl FenceCreateInfo {
     pub(crate) fn validate(&self, device: &Device) -> Result<(), Box<ValidationError>> {
         let &Self {
             flags,
@@ -808,9 +825,7 @@ impl FenceCreateInfo {
                 let external_fence_properties = unsafe {
                     device
                         .physical_device()
-                        .external_fence_properties_unchecked(ExternalFenceInfo::handle_type(
-                            handle_type,
-                        ))
+                        .external_fence_properties_unchecked(ExternalFenceInfo::new(handle_type))
                 };
 
                 if !external_fence_properties.exportable {
@@ -853,14 +868,14 @@ impl FenceCreateInfo {
     pub(crate) fn to_vk<'a>(
         &self,
         extensions_vk: &'a mut FenceCreateInfoExtensionsVk,
-    ) -> ash::vk::FenceCreateInfo<'a> {
+    ) -> vk::FenceCreateInfo<'a> {
         let &Self {
             flags,
             export_handle_types: _,
             _ne: _,
         } = self;
 
-        let mut val_vk = ash::vk::FenceCreateInfo::default().flags(flags.into());
+        let mut val_vk = vk::FenceCreateInfo::default().flags(flags.into());
 
         let FenceCreateInfoExtensionsVk { export_vk } = extensions_vk;
 
@@ -878,16 +893,15 @@ impl FenceCreateInfo {
             _ne: _,
         } = self;
 
-        let export_vk = (!export_handle_types.is_empty()).then(|| {
-            ash::vk::ExportFenceCreateInfo::default().handle_types(export_handle_types.into())
-        });
+        let export_vk = (!export_handle_types.is_empty())
+            .then(|| vk::ExportFenceCreateInfo::default().handle_types(export_handle_types.into()));
 
         FenceCreateInfoExtensionsVk { export_vk }
     }
 }
 
 pub(crate) struct FenceCreateInfoExtensionsVk {
-    pub(crate) export_vk: Option<ash::vk::ExportFenceCreateInfo<'static>>,
+    pub(crate) export_vk: Option<vk::ExportFenceCreateInfo<'static>>,
 }
 
 vulkan_bitflags! {
@@ -984,15 +998,21 @@ pub struct ImportFenceFdInfo {
 }
 
 impl ImportFenceFdInfo {
-    /// Returns an `ImportFenceFdInfo` with the specified `handle_type`.
+    /// Returns a default `ImportFenceFdInfo` with the provided `handle_type`.
     #[inline]
-    pub fn handle_type(handle_type: ExternalFenceHandleType) -> Self {
+    pub const fn new(handle_type: ExternalFenceHandleType) -> Self {
         Self {
             flags: FenceImportFlags::empty(),
             handle_type,
             file: None,
             _ne: crate::NonExhaustive(()),
         }
+    }
+
+    #[deprecated(since = "0.36.0", note = "use `new` instead")]
+    #[inline]
+    pub fn handle_type(handle_type: ExternalFenceHandleType) -> Self {
+        Self::new(handle_type)
     }
 
     pub(crate) fn validate(&self, device: &Device) -> Result<(), Box<ValidationError>> {
@@ -1043,10 +1063,7 @@ impl ImportFenceFdInfo {
         Ok(())
     }
 
-    pub(crate) fn into_vk(
-        self,
-        fence_vk: ash::vk::Fence,
-    ) -> ash::vk::ImportFenceFdInfoKHR<'static> {
+    pub(crate) fn into_vk(self, fence_vk: vk::Fence) -> vk::ImportFenceFdInfoKHR<'static> {
         let ImportFenceFdInfo {
             flags,
             handle_type,
@@ -1066,7 +1083,7 @@ impl ImportFenceFdInfo {
             -1
         };
 
-        ash::vk::ImportFenceFdInfoKHR::default()
+        vk::ImportFenceFdInfoKHR::default()
             .fence(fence_vk)
             .flags(flags.into())
             .handle_type(handle_type.into())
@@ -1091,21 +1108,27 @@ pub struct ImportFenceWin32HandleInfo {
     /// The file to import the fence from.
     ///
     /// The default value is `0`, which must be overridden.
-    pub handle: ash::vk::HANDLE,
+    pub handle: vk::HANDLE,
 
     pub _ne: crate::NonExhaustive,
 }
 
 impl ImportFenceWin32HandleInfo {
-    /// Returns an `ImportFenceWin32HandleInfo` with the specified `handle_type`.
+    /// Returns a default `ImportFenceWin32HandleInfo` with the provided `handle_type`.
     #[inline]
-    pub fn handle_type(handle_type: ExternalFenceHandleType) -> Self {
+    pub const fn new(handle_type: ExternalFenceHandleType) -> Self {
         Self {
             flags: FenceImportFlags::empty(),
             handle_type,
             handle: 0,
             _ne: crate::NonExhaustive(()),
         }
+    }
+
+    #[deprecated(since = "0.36.0", note = "use `new` instead")]
+    #[inline]
+    pub fn handle_type(handle_type: ExternalFenceHandleType) -> Self {
+        Self::new(handle_type)
     }
 
     pub(crate) fn validate(&self, device: &Device) -> Result<(), Box<ValidationError>> {
@@ -1156,10 +1179,7 @@ impl ImportFenceWin32HandleInfo {
         Ok(())
     }
 
-    pub(crate) fn to_vk(
-        &self,
-        fence_vk: ash::vk::Fence,
-    ) -> ash::vk::ImportFenceWin32HandleInfoKHR<'static> {
+    pub(crate) fn to_vk(&self, fence_vk: vk::Fence) -> vk::ImportFenceWin32HandleInfoKHR<'static> {
         let &Self {
             flags,
             handle_type,
@@ -1167,7 +1187,7 @@ impl ImportFenceWin32HandleInfo {
             _ne: _,
         } = self;
 
-        ash::vk::ImportFenceWin32HandleInfoKHR::default()
+        vk::ImportFenceWin32HandleInfoKHR::default()
             .fence(fence_vk)
             .flags(flags.into())
             .handle_type(handle_type.into())
@@ -1187,13 +1207,19 @@ pub struct ExternalFenceInfo {
 }
 
 impl ExternalFenceInfo {
-    /// Returns an `ExternalFenceInfo` with the specified `handle_type`.
+    /// Returns a default `ExternalFenceInfo` with the provided `handle_type`.
     #[inline]
-    pub fn handle_type(handle_type: ExternalFenceHandleType) -> Self {
+    pub const fn new(handle_type: ExternalFenceHandleType) -> Self {
         Self {
             handle_type,
             _ne: crate::NonExhaustive(()),
         }
+    }
+
+    #[deprecated(since = "0.36.0", note = "use `new` instead")]
+    #[inline]
+    pub fn handle_type(handle_type: ExternalFenceHandleType) -> Self {
+        Self::new(handle_type)
     }
 
     pub(crate) fn validate(
@@ -1215,13 +1241,13 @@ impl ExternalFenceInfo {
         Ok(())
     }
 
-    pub(crate) fn to_vk(&self) -> ash::vk::PhysicalDeviceExternalFenceInfo<'static> {
+    pub(crate) fn to_vk(&self) -> vk::PhysicalDeviceExternalFenceInfo<'static> {
         let &Self {
             handle_type,
             _ne: _,
         } = self;
 
-        ash::vk::PhysicalDeviceExternalFenceInfo::default().handle_type(handle_type.into())
+        vk::PhysicalDeviceExternalFenceInfo::default().handle_type(handle_type.into())
     }
 }
 
@@ -1248,12 +1274,12 @@ pub struct ExternalFenceProperties {
 }
 
 impl ExternalFenceProperties {
-    pub(crate) fn to_mut_vk() -> ash::vk::ExternalFenceProperties<'static> {
-        ash::vk::ExternalFenceProperties::default()
+    pub(crate) fn to_mut_vk() -> vk::ExternalFenceProperties<'static> {
+        vk::ExternalFenceProperties::default()
     }
 
-    pub(crate) fn from_vk(val_vk: &ash::vk::ExternalFenceProperties<'_>) -> Self {
-        let &ash::vk::ExternalFenceProperties {
+    pub(crate) fn from_vk(val_vk: &vk::ExternalFenceProperties<'_>) -> Self {
+        let &vk::ExternalFenceProperties {
             export_from_imported_handle_types,
             compatible_handle_types,
             external_fence_features,
@@ -1262,9 +1288,9 @@ impl ExternalFenceProperties {
 
         ExternalFenceProperties {
             exportable: external_fence_features
-                .intersects(ash::vk::ExternalFenceFeatureFlags::EXPORTABLE),
+                .intersects(vk::ExternalFenceFeatureFlags::EXPORTABLE),
             importable: external_fence_features
-                .intersects(ash::vk::ExternalFenceFeatureFlags::IMPORTABLE),
+                .intersects(vk::ExternalFenceFeatureFlags::IMPORTABLE),
             export_from_imported_handle_types: export_from_imported_handle_types.into(),
             compatible_handle_types: compatible_handle_types.into(),
         }

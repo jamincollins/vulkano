@@ -8,8 +8,9 @@ use crate::{
     macros::{impl_id_counter, vulkan_bitflags},
     Validated, ValidationError, VulkanError, VulkanObject,
 };
+use ash::vk;
 use smallvec::SmallVec;
-use std::{mem::MaybeUninit, num::NonZeroU64, ops::Range, ptr, sync::Arc};
+use std::{mem::MaybeUninit, num::NonZero, ops::Range, ptr, sync::Arc};
 
 /// The image views that are attached to a render pass during drawing.
 ///
@@ -37,9 +38,9 @@ use std::{mem::MaybeUninit, num::NonZeroU64, ops::Range, ptr, sync::Arc};
 /// ```
 #[derive(Debug)]
 pub struct Framebuffer {
-    handle: ash::vk::Framebuffer,
+    handle: vk::Framebuffer,
     render_pass: DeviceOwnedDebugWrapper<Arc<RenderPass>>,
-    id: NonZeroU64,
+    id: NonZero<u64>,
 
     flags: FramebufferCreateFlags,
     attachments: Vec<DeviceOwnedDebugWrapper<Arc<ImageView>>>,
@@ -266,7 +267,7 @@ impl Framebuffer {
             unsafe { output.assume_init() }
         };
 
-        Ok(Self::from_handle(render_pass, handle, create_info))
+        Ok(unsafe { Self::from_handle(render_pass, handle, create_info) })
     }
 
     /// Creates a new `Framebuffer` from a raw object handle.
@@ -278,7 +279,7 @@ impl Framebuffer {
     #[inline]
     pub unsafe fn from_handle(
         render_pass: Arc<RenderPass>,
-        handle: ash::vk::Framebuffer,
+        handle: vk::Framebuffer,
         mut create_info: FramebufferCreateInfo,
     ) -> Arc<Framebuffer> {
         create_info.set_auto_extent_layers(&render_pass);
@@ -355,7 +356,7 @@ impl Drop for Framebuffer {
 }
 
 unsafe impl VulkanObject for Framebuffer {
-    type Handle = ash::vk::Framebuffer;
+    type Handle = vk::Framebuffer;
 
     #[inline]
     fn handle(&self) -> Self::Handle {
@@ -435,6 +436,14 @@ pub struct FramebufferCreateInfo {
 impl Default for FramebufferCreateInfo {
     #[inline]
     fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FramebufferCreateInfo {
+    /// Returns a default `FramebufferCreateInfo`.
+    #[inline]
+    pub const fn new() -> Self {
         Self {
             flags: FramebufferCreateFlags::empty(),
             attachments: Vec::new(),
@@ -443,9 +452,7 @@ impl Default for FramebufferCreateInfo {
             _ne: crate::NonExhaustive(()),
         }
     }
-}
 
-impl FramebufferCreateInfo {
     fn set_auto_extent_layers(&mut self, render_pass: &RenderPass) {
         let Self {
             flags: _,
@@ -616,9 +623,9 @@ impl FramebufferCreateInfo {
 
     pub(crate) fn to_vk<'a>(
         &self,
-        render_pass_vk: ash::vk::RenderPass,
+        render_pass_vk: vk::RenderPass,
         fields1_vk: &'a FramebufferCreateInfoFields1Vk,
-    ) -> ash::vk::FramebufferCreateInfo<'a> {
+    ) -> vk::FramebufferCreateInfo<'a> {
         let &Self {
             flags,
             attachments: _,
@@ -628,7 +635,7 @@ impl FramebufferCreateInfo {
         } = self;
         let FramebufferCreateInfoFields1Vk { attachments_vk } = fields1_vk;
 
-        ash::vk::FramebufferCreateInfo::default()
+        vk::FramebufferCreateInfo::default()
             .flags(flags.into())
             .render_pass(render_pass_vk)
             .attachments(attachments_vk)
@@ -650,7 +657,7 @@ impl FramebufferCreateInfo {
 }
 
 pub(crate) struct FramebufferCreateInfoFields1Vk {
-    pub(crate) attachments_vk: SmallVec<[ash::vk::ImageView; 4]>,
+    pub(crate) attachments_vk: SmallVec<[vk::ImageView; 4]>,
 }
 
 vulkan_bitflags! {

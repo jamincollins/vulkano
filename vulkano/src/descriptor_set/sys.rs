@@ -10,6 +10,7 @@ use crate::{
     device::{Device, DeviceOwned},
     Validated, ValidationError, VulkanError, VulkanObject,
 };
+use ash::vk;
 use smallvec::SmallVec;
 use std::{
     fmt::Debug,
@@ -89,7 +90,7 @@ impl RawDescriptorSet {
 
         self.validate_update(descriptor_writes, descriptor_copies)?;
 
-        self.update_unchecked(descriptor_writes, descriptor_copies);
+        unsafe { self.update_unchecked(descriptor_writes, descriptor_copies) };
         Ok(())
     }
 
@@ -157,13 +158,15 @@ impl RawDescriptorSet {
             .collect();
 
         let fns = self.device().fns();
-        (fns.v1_0.update_descriptor_sets)(
-            self.device().handle(),
-            writes_vk.len() as u32,
-            writes_vk.as_ptr(),
-            copies_vk.len() as u32,
-            copies_vk.as_ptr(),
-        );
+        unsafe {
+            (fns.v1_0.update_descriptor_sets)(
+                self.device().handle(),
+                writes_vk.len() as u32,
+                writes_vk.as_ptr(),
+                copies_vk.len() as u32,
+                copies_vk.as_ptr(),
+            )
+        };
     }
 }
 
@@ -176,7 +179,7 @@ impl Drop for RawDescriptorSet {
 }
 
 unsafe impl VulkanObject for RawDescriptorSet {
-    type Handle = ash::vk::DescriptorSet;
+    type Handle = vk::DescriptorSet;
 
     #[inline]
     fn handle(&self) -> Self::Handle {

@@ -1,6 +1,9 @@
 //! Synchronization state tracking of all resources.
 
-use crate::{Id, InvalidSlotError, Object, Ref};
+use crate::{
+    descriptor_set::{BindlessContext, BindlessContextCreateInfo},
+    Id, InvalidSlotError, Object, Ref,
+};
 use ash::vk;
 use concurrent_slotmap::{epoch, SlotMap};
 use parking_lot::{Mutex, RwLock};
@@ -8,7 +11,8 @@ use smallvec::SmallVec;
 use std::{
     any::Any,
     hash::Hash,
-    num::{NonZeroU32, NonZeroU64},
+    num::NonZero,
+    ops::{BitOr, BitOrAssign},
     sync::{
         atomic::{AtomicU32, AtomicU64, Ordering},
         Arc,
@@ -19,6 +23,7 @@ use thread_local::ThreadLocal;
 use vulkano::{
     buffer::{AllocateBufferError, Buffer, BufferCreateInfo},
     command_buffer::allocator::StandardCommandBufferAllocator,
+    descriptor_set::allocator::StandardDescriptorSetAllocator,
     device::{Device, DeviceOwned},
     image::{AllocateImageError, Image, ImageCreateInfo, ImageLayout, ImageMemory},
     memory::allocator::{AllocationCreateInfo, DeviceLayout, StandardMemoryAllocator},
@@ -41,9 +46,18 @@ static REGISTERED_DEVICES: Mutex<Vec<usize>> = Mutex::new(Vec::new());
 // FIXME: Custom collector
 #[derive(Debug)]
 pub struct Resources {
+    // DO NOT change the order of these fields! `ResourceStorage` must be dropped first because
+    // that guarantees that all flights are waited on before the descriptor set is destroyed.
+    storage: Arc<ResourceStorage>,
+    bindless_context: Option<BindlessContext>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ResourceStorage {
     device: Arc<Device>,
     memory_allocator: Arc<StandardMemoryAllocator>,
     command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
+    descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
 
     global: epoch::GlobalHandle,
     locals: ThreadLocal<epoch::UniqueLocalHandle>,
@@ -101,7 +115,7 @@ pub(crate) struct SwapchainSemaphoreState {
 // FIXME: imported/exported fences
 #[derive(Debug)]
 pub struct Flight {
-    frame_count: NonZeroU32,
+    frame_count: NonZero<u32>,
     current_frame: AtomicU64,
     fences: SmallVec<[RwLock<Fence>; 3]>,
     pub(crate) state: Mutex<FlightState>,
@@ -120,8 +134,10 @@ impl Resources {
     /// # Panics
     ///
     /// - Panics if `device` already has a `Resources` collection associated with it.
-    #[must_use]
-    pub fn new(device: &Arc<Device>, create_info: &ResourcesCreateInfo<'_>) -> Arc<Self> {
+    pub fn new(
+        device: &Arc<Device>,
+        create_info: &ResourcesCreateInfo<'_>,
+    ) -> Result<Arc<Self>, Validated<VulkanError>> {
         let mut registered_devices = REGISTERED_DEVICES.lock();
         let device_addr = Arc::as_ptr(device) as usize;
 
@@ -131,33 +147,64 @@ impl Resources {
         );
 
         registered_devices.push(device_addr);
+        drop(registered_devices);
 
         let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
         let command_buffer_allocator = Arc::new(StandardCommandBufferAllocator::new(
             device.clone(),
             Default::default(),
         ));
+        let descriptor_set_allocator = Arc::new(StandardDescriptorSetAllocator::new(
+            device.clone(),
+            Default::default(),
+        ));
 
         let global = epoch::GlobalHandle::new();
-
-        Arc::new(Resources {
+        let storage = Arc::new(ResourceStorage {
             device: device.clone(),
             memory_allocator,
             command_buffer_allocator,
+            descriptor_set_allocator,
             locals: ThreadLocal::new(),
             buffers: SlotMap::with_global(create_info.max_buffers, global.clone()),
             images: SlotMap::with_global(create_info.max_images, global.clone()),
             swapchains: SlotMap::with_global(create_info.max_swapchains, global.clone()),
             flights: SlotMap::with_global(create_info.max_flights, global.clone()),
             global,
-        })
+        });
+        let bindless_context = create_info
+            .bindless_context
+            .map(|bindless_info| BindlessContext::new(&storage, bindless_info))
+            .transpose()?;
+
+        Ok(Arc::new(Resources {
+            storage,
+            bindless_context,
+        }))
     }
 
     /// Returns the standard memory allocator.
     #[inline]
     #[must_use]
     pub fn memory_allocator(&self) -> &Arc<StandardMemoryAllocator> {
-        &self.memory_allocator
+        &self.storage.memory_allocator
+    }
+
+    pub(crate) fn command_buffer_allocator(&self) -> &Arc<StandardCommandBufferAllocator> {
+        &self.storage.command_buffer_allocator
+    }
+
+    pub(crate) fn descriptor_set_allocator(&self) -> &Arc<StandardDescriptorSetAllocator> {
+        &self.storage.descriptor_set_allocator
+    }
+
+    /// Returns the `BindlessContext`.
+    ///
+    /// Returns `None` if [`ResourcesCreateInfo::bindless_context`] was not specified when creating
+    /// the collection.
+    #[inline]
+    pub fn bindless_context(&self) -> Option<&BindlessContext> {
+        self.bindless_context.as_ref()
     }
 
     /// Creates a new buffer and adds it to the collection.
@@ -176,7 +223,7 @@ impl Resources {
         layout: DeviceLayout,
     ) -> Result<Id<Buffer>, Validated<AllocateBufferError>> {
         let buffer = Buffer::new(
-            self.memory_allocator.clone(),
+            self.storage.memory_allocator.clone(),
             create_info,
             allocation_info,
             layout,
@@ -196,7 +243,11 @@ impl Resources {
         create_info: ImageCreateInfo,
         allocation_info: AllocationCreateInfo,
     ) -> Result<Id<Image>, Validated<AllocateImageError>> {
-        let image = Image::new(self.memory_allocator.clone(), create_info, allocation_info)?;
+        let image = Image::new(
+            self.storage.memory_allocator.clone(),
+            create_info,
+            allocation_info,
+        )?;
 
         // SAFETY: We just created the image.
         Ok(unsafe { self.add_image_unchecked(image) })
@@ -245,7 +296,7 @@ impl Resources {
     /// - Returns an error when [`Fence::new_unchecked`] returns an error.
     pub fn create_flight(&self, frame_count: u32) -> Result<Id<Flight>, VulkanError> {
         let frame_count =
-            NonZeroU32::new(frame_count).expect("a flight with zero frames is not valid");
+            NonZero::new(frame_count).expect("a flight with zero frames is not valid");
 
         let fences = (0..frame_count.get())
             .map(|_| {
@@ -273,8 +324,9 @@ impl Resources {
         };
 
         let slot = self
+            .storage
             .flights
-            .insert_with_tag(flight, Flight::TAG, self.pin());
+            .insert_with_tag(flight, Flight::TAG, self.storage.pin());
 
         Ok(unsafe { Id::new(slot) })
     }
@@ -299,7 +351,10 @@ impl Resources {
             last_access: Mutex::new(BufferAccess::NONE),
         };
 
-        let slot = self.buffers.insert_with_tag(state, Buffer::TAG, self.pin());
+        let slot = self
+            .storage
+            .buffers
+            .insert_with_tag(state, Buffer::TAG, self.storage.pin());
 
         unsafe { Id::new(slot) }
     }
@@ -331,7 +386,10 @@ impl Resources {
             last_access: Mutex::new(ImageAccess::NONE),
         };
 
-        let slot = self.images.insert_with_tag(state, Image::TAG, self.pin());
+        let slot = self
+            .storage
+            .images
+            .insert_with_tag(state, Image::TAG, self.storage.pin());
 
         unsafe { Id::new(slot) }
     }
@@ -415,9 +473,9 @@ impl Resources {
         swapchain: Arc<Swapchain>,
         images: Vec<Arc<Image>>,
     ) -> Result<Id<Swapchain>, VulkanError> {
-        let guard = &self.pin();
+        let guard = &self.storage.pin();
 
-        let frames_in_flight = unsafe { self.flight_unprotected(flight_id) }
+        let frames_in_flight = unsafe { self.storage.flight_unprotected(flight_id) }
             .unwrap()
             .frame_count();
 
@@ -450,6 +508,7 @@ impl Resources {
         };
 
         let slot = self
+            .storage
             .swapchains
             .insert_with_tag(state, Swapchain::TAG, guard);
 
@@ -476,12 +535,12 @@ impl Resources {
         id: Id<Swapchain>,
         f: impl FnOnce(SwapchainCreateInfo) -> SwapchainCreateInfo,
     ) -> Result<Id<Swapchain>, Validated<VulkanError>> {
-        let guard = self.pin();
+        let guard = self.storage.pin();
 
-        let state = unsafe { self.swapchain_unprotected(id) }.unwrap();
+        let state = unsafe { self.storage.swapchain_unprotected(id) }.unwrap();
         let swapchain = state.swapchain();
         let flight_id = state.flight_id;
-        let flight = unsafe { self.flight_unprotected_unchecked(flight_id) };
+        let flight = unsafe { self.storage.flight_unprotected_unchecked(flight_id) };
         let mut flight_state = flight.state.try_lock().unwrap();
 
         let (new_swapchain, new_images) = swapchain.recreate(f(swapchain.create_info()))?;
@@ -503,6 +562,7 @@ impl Resources {
         };
 
         let slot = self
+            .storage
             .swapchains
             .insert_with_tag(new_state, Swapchain::TAG, guard);
 
@@ -519,8 +579,9 @@ impl Resources {
     ///   pending command buffer, and if it is used in any command buffer that's in the executable
     ///   or recording state, that command buffer must never be executed.
     pub unsafe fn remove_buffer(&self, id: Id<Buffer>) -> Result<Ref<'_, BufferState>> {
-        self.buffers
-            .remove(id.slot, self.pin())
+        self.storage
+            .buffers
+            .remove(id.slot, self.storage.pin())
             .map(Ref)
             .ok_or(InvalidSlotError::new(id))
     }
@@ -533,8 +594,9 @@ impl Resources {
     ///   command buffer, and if it is used in any command buffer that's in the executable or
     ///   recording state, that command buffer must never be executed.
     pub unsafe fn remove_image(&self, id: Id<Image>) -> Result<Ref<'_, ImageState>> {
-        self.images
-            .remove(id.slot, self.pin())
+        self.storage
+            .images
+            .remove(id.slot, self.storage.pin())
             .map(Ref)
             .ok_or(InvalidSlotError::new(id))
     }
@@ -547,8 +609,9 @@ impl Resources {
     ///   pending command buffer, and if it is used in any command buffer that's in the executable
     ///   or recording state, that command buffer must never be executed.
     pub unsafe fn remove_swapchain(&self, id: Id<Swapchain>) -> Result<Ref<'_, SwapchainState>> {
-        self.swapchains
-            .remove(id.slot, self.pin())
+        self.storage
+            .swapchains
+            .remove(id.slot, self.storage.pin())
             .map(Ref)
             .ok_or(InvalidSlotError::new(id))
     }
@@ -556,19 +619,109 @@ impl Resources {
     /// Returns the buffer corresponding to `id`.
     #[inline]
     pub fn buffer(&self, id: Id<Buffer>) -> Result<Ref<'_, BufferState>> {
+        self.storage.buffer(id)
+    }
+
+    pub(crate) unsafe fn buffer_unprotected(&self, id: Id<Buffer>) -> Result<&BufferState> {
+        // SAFETY: Enforced by the caller.
+        unsafe { self.storage.buffer_unprotected(id) }
+    }
+
+    pub(crate) unsafe fn buffer_unchecked_unprotected(&self, id: Id<Buffer>) -> &BufferState {
+        // SAFETY: Enforced by the caller.
+        unsafe { self.storage.buffer_unchecked_unprotected(id) }
+    }
+
+    /// Returns the image corresponding to `id`.
+    #[inline]
+    pub fn image(&self, id: Id<Image>) -> Result<Ref<'_, ImageState>> {
+        self.storage.image(id)
+    }
+
+    pub(crate) unsafe fn image_unprotected(&self, id: Id<Image>) -> Result<&ImageState> {
+        // SAFETY: Enforced by the caller.
+        unsafe { self.storage.image_unprotected(id) }
+    }
+
+    pub(crate) unsafe fn image_unchecked_unprotected(&self, id: Id<Image>) -> &ImageState {
+        // SAFETY: Enforced by the caller.
+        unsafe { self.storage.image_unchecked_unprotected(id) }
+    }
+
+    /// Returns the swapchain corresponding to `id`.
+    #[inline]
+    pub fn swapchain(&self, id: Id<Swapchain>) -> Result<Ref<'_, SwapchainState>> {
+        self.storage.swapchain(id)
+    }
+
+    pub(crate) unsafe fn swapchain_unprotected(
+        &self,
+        id: Id<Swapchain>,
+    ) -> Result<&SwapchainState> {
+        // SAFETY: Enforced by the caller.
+        unsafe { self.storage.swapchain_unprotected(id) }
+    }
+
+    pub(crate) unsafe fn swapchain_unchecked_unprotected(
+        &self,
+        id: Id<Swapchain>,
+    ) -> &SwapchainState {
+        // SAFETY: Enforced by the caller.
+        unsafe { self.storage.swapchain_unchecked_unprotected(id) }
+    }
+
+    /// Returns the [flight] corresponding to `id`.
+    #[inline]
+    pub fn flight(&self, id: Id<Flight>) -> Result<Ref<'_, Flight>> {
+        self.storage.flight(id)
+    }
+
+    pub(crate) unsafe fn flight_unprotected(&self, id: Id<Flight>) -> Result<&Flight> {
+        // SAFETY: Enforced by the caller.
+        unsafe { self.storage.flight_unprotected(id) }
+    }
+
+    pub(crate) fn pin(&self) -> epoch::Guard<'_> {
+        self.storage.pin()
+    }
+
+    pub(crate) fn try_collect(&self, guard: &epoch::Guard<'_>) {
+        self.storage.try_collect(guard);
+
+        if let Some(bindless_context) = &self.bindless_context {
+            bindless_context.global_set().try_collect(guard);
+        }
+    }
+}
+
+unsafe impl DeviceOwned for Resources {
+    #[inline]
+    fn device(&self) -> &Arc<Device> {
+        &self.storage.device
+    }
+}
+
+impl ResourceStorage {
+    pub(crate) fn global(&self) -> &epoch::GlobalHandle {
+        &self.global
+    }
+
+    pub(crate) fn pin(&self) -> epoch::Guard<'_> {
+        self.locals.get_or(|| self.global.register_local()).pin()
+    }
+
+    pub(crate) fn buffer(&self, id: Id<Buffer>) -> Result<Ref<'_, BufferState>> {
         self.buffers
             .get(id.slot, self.pin())
             .map(Ref)
             .ok_or(InvalidSlotError::new(id))
     }
 
-    #[inline]
     pub(crate) unsafe fn buffer_unprotected(&self, id: Id<Buffer>) -> Result<&BufferState> {
         // SAFETY: Enforced by the caller.
         unsafe { self.buffers.get_unprotected(id.slot) }.ok_or(InvalidSlotError::new(id))
     }
 
-    #[inline]
     pub(crate) unsafe fn buffer_unchecked_unprotected(&self, id: Id<Buffer>) -> &BufferState {
         #[cfg(debug_assertions)]
         if unsafe { self.buffers.get_unprotected(id.slot) }.is_none() {
@@ -579,22 +732,18 @@ impl Resources {
         unsafe { self.buffers.index_unchecked_unprotected(id.index()) }
     }
 
-    /// Returns the image corresponding to `id`.
-    #[inline]
-    pub fn image(&self, id: Id<Image>) -> Result<Ref<'_, ImageState>> {
+    pub(crate) fn image(&self, id: Id<Image>) -> Result<Ref<'_, ImageState>> {
         self.images
             .get(id.slot, self.pin())
             .map(Ref)
             .ok_or(InvalidSlotError::new(id))
     }
 
-    #[inline]
     pub(crate) unsafe fn image_unprotected(&self, id: Id<Image>) -> Result<&ImageState> {
         // SAFETY: Enforced by the caller.
         unsafe { self.images.get_unprotected(id.slot) }.ok_or(InvalidSlotError::new(id))
     }
 
-    #[inline]
     pub(crate) unsafe fn image_unchecked_unprotected(&self, id: Id<Image>) -> &ImageState {
         #[cfg(debug_assertions)]
         if unsafe { self.images.get_unprotected(id.slot) }.is_none() {
@@ -605,16 +754,13 @@ impl Resources {
         unsafe { self.images.index_unchecked_unprotected(id.index()) }
     }
 
-    /// Returns the swapchain corresponding to `id`.
-    #[inline]
-    pub fn swapchain(&self, id: Id<Swapchain>) -> Result<Ref<'_, SwapchainState>> {
+    pub(crate) fn swapchain(&self, id: Id<Swapchain>) -> Result<Ref<'_, SwapchainState>> {
         self.swapchains
             .get(id.slot, self.pin())
             .map(Ref)
             .ok_or(InvalidSlotError::new(id))
     }
 
-    #[inline]
     pub(crate) unsafe fn swapchain_unprotected(
         &self,
         id: Id<Swapchain>,
@@ -623,7 +769,6 @@ impl Resources {
         unsafe { self.swapchains.get_unprotected(id.slot) }.ok_or(InvalidSlotError::new(id))
     }
 
-    #[inline]
     pub(crate) unsafe fn swapchain_unchecked_unprotected(
         &self,
         id: Id<Swapchain>,
@@ -637,47 +782,38 @@ impl Resources {
         unsafe { self.swapchains.index_unchecked_unprotected(id.index()) }
     }
 
-    /// Returns the [flight] corresponding to `id`.
-    #[inline]
-    pub fn flight(&self, id: Id<Flight>) -> Result<Ref<'_, Flight>> {
+    pub(crate) fn flight(&self, id: Id<Flight>) -> Result<Ref<'_, Flight>> {
         self.flights
             .get(id.slot, self.pin())
             .map(Ref)
             .ok_or(InvalidSlotError::new(id))
     }
 
-    #[inline]
     pub(crate) unsafe fn flight_unprotected(&self, id: Id<Flight>) -> Result<&Flight> {
         // SAFETY: Enforced by the caller.
         unsafe { self.flights.get_unprotected(id.slot) }.ok_or(InvalidSlotError::new(id))
     }
 
-    #[inline]
     pub(crate) unsafe fn flight_unprotected_unchecked(&self, id: Id<Flight>) -> &Flight {
         // SAFETY: Enforced by the caller.
         unsafe { self.flights.index_unchecked_unprotected(id.slot.index()) }
     }
 
-    #[inline]
-    pub(crate) fn pin(&self) -> epoch::Guard<'_> {
-        self.locals.get_or(|| self.global.register_local()).pin()
-    }
-
-    pub(crate) fn command_buffer_allocator(&self) -> &Arc<StandardCommandBufferAllocator> {
-        &self.command_buffer_allocator
-    }
-
-    pub(crate) fn try_advance_global_and_collect(&self, guard: &epoch::Guard<'_>) {
-        if guard.try_advance_global() {
-            self.buffers.try_collect(guard);
-            self.images.try_collect(guard);
-            self.swapchains.try_collect(guard);
-            self.flights.try_collect(guard);
-        }
+    pub(crate) fn try_collect(&self, guard: &epoch::Guard<'_>) {
+        self.buffers.try_collect(guard);
+        self.images.try_collect(guard);
+        self.swapchains.try_collect(guard);
+        self.flights.try_collect(guard);
     }
 }
 
-impl Drop for Resources {
+unsafe impl DeviceOwned for ResourceStorage {
+    fn device(&self) -> &Arc<Device> {
+        &self.device
+    }
+}
+
+impl Drop for ResourceStorage {
     fn drop(&mut self) {
         for (flight_id, flight) in &mut self.flights {
             let prev_frame_index = flight.previous_frame_index();
@@ -709,13 +845,6 @@ impl Drop for Resources {
             .unwrap();
 
         registered_devices.remove(index);
-    }
-}
-
-unsafe impl DeviceOwned for Resources {
-    #[inline]
-    fn device(&self) -> &Arc<Device> {
-        &self.device
     }
 }
 
@@ -760,25 +889,14 @@ impl BufferAccess {
     /// - Panics if `access_types` contains any access type that's not valid for buffers.
     #[inline]
     #[must_use]
-    pub const fn new(access_types: &[AccessType], queue_family_index: u32) -> Self {
-        let mut access = BufferAccess {
-            stage_mask: PipelineStages::empty(),
-            access_mask: AccessFlags::empty(),
+    pub const fn new(access_types: AccessTypes, queue_family_index: u32) -> Self {
+        assert!(access_types.are_valid_buffer_access_types());
+
+        BufferAccess {
+            stage_mask: access_types.stage_mask(),
+            access_mask: access_types.access_mask(),
             queue_family_index,
-        };
-        let mut i = 0;
-
-        while i < access_types.len() {
-            let access_type = access_types[i];
-
-            assert!(access_type.is_valid_buffer_access_type());
-
-            access.stage_mask = access.stage_mask.union(access_type.stage_mask());
-            access.access_mask = access.access_mask.union(access_type.access_mask());
-            i += 1;
         }
-
-        access
     }
 
     pub(crate) const fn from_masks(
@@ -858,38 +976,18 @@ impl ImageAccess {
     #[inline]
     #[must_use]
     pub const fn new(
-        access_types: &[AccessType],
+        access_types: AccessTypes,
         layout_type: ImageLayoutType,
         queue_family_index: u32,
     ) -> Self {
-        let mut access = ImageAccess {
-            stage_mask: PipelineStages::empty(),
-            access_mask: AccessFlags::empty(),
-            image_layout: ImageLayout::Undefined,
+        assert!(access_types.are_valid_image_access_types());
+
+        ImageAccess {
+            stage_mask: access_types.stage_mask(),
+            access_mask: access_types.access_mask(),
+            image_layout: access_types.image_layout(layout_type),
             queue_family_index,
-        };
-        let mut i = 0;
-
-        while i < access_types.len() {
-            let access_type = access_types[i];
-
-            assert!(access_type.is_valid_image_access_type());
-
-            let image_layout = access_type.image_layout(layout_type);
-
-            access.stage_mask = access.stage_mask.union(access_type.stage_mask());
-            access.access_mask = access.access_mask.union(access_type.access_mask());
-            access.image_layout = if matches!(access.image_layout, ImageLayout::Undefined)
-                || access.image_layout as i32 == image_layout as i32
-            {
-                image_layout
-            } else {
-                ImageLayout::General
-            };
-            i += 1;
         }
-
-        access
     }
 
     pub(crate) const fn from_masks(
@@ -1004,11 +1102,11 @@ impl Flight {
     #[inline]
     #[must_use]
     pub fn current_frame_index(&self) -> u32 {
-        (self.current_frame() % NonZeroU64::from(self.frame_count)) as u32
+        (self.current_frame() % NonZero::<u64>::from(self.frame_count)) as u32
     }
 
     fn previous_frame_index(&self) -> u32 {
-        (self.current_frame().wrapping_sub(1) % NonZeroU64::from(self.frame_count)) as u32
+        (self.current_frame().wrapping_sub(1) % NonZero::<u64>::from(self.frame_count)) as u32
     }
 
     pub(crate) fn current_fence(&self) -> &RwLock<Fence> {
@@ -1041,7 +1139,7 @@ impl Flight {
             return Ok(());
         }
 
-        self.fences[(frame % NonZeroU64::from(self.frame_count)) as usize]
+        self.fences[(frame % NonZero::<u64>::from(self.frame_count)) as usize]
             .read()
             .wait(timeout)
     }
@@ -1082,16 +1180,33 @@ impl Flight {
 #[derive(Debug)]
 pub struct ResourcesCreateInfo<'a> {
     /// The maximum number of [`Buffer`]s that the collection can hold at once.
+    ///
+    /// The default value is `16777216` (2<sup>24</sup>).
     pub max_buffers: u32,
 
     /// The maximum number of [`Image`]s that the collection can hold at once.
+    ///
+    /// The default value is `16777216` (2<sup>24</sup>).
     pub max_images: u32,
 
     /// The maximum number of [`Swapchain`]s that the collection can hold at once.
+    ///
+    /// The default value is `256` (2<sup>8</sup>).
     pub max_swapchains: u32,
 
     /// The maximum number of [`Flight`]s that the collection can hold at once.
+    ///
+    /// The default value is `256` (2<sup>8</sup>).
     pub max_flights: u32,
+
+    /// Parameters to create a new [`BindlessContext`].
+    ///
+    /// If set, the device extensions given by [`BindlessContext::required_extensions`] and the
+    /// device features given by [`BindlessContext::required_features`] must be enabled on the
+    /// device.
+    ///
+    /// The default value is `None`.
+    pub bindless_context: Option<&'a BindlessContextCreateInfo<'a>>,
 
     pub _ne: crate::NonExhaustive<'a>,
 }
@@ -1099,14 +1214,31 @@ pub struct ResourcesCreateInfo<'a> {
 impl Default for ResourcesCreateInfo<'_> {
     #[inline]
     fn default() -> Self {
-        ResourcesCreateInfo {
+        Self::new()
+    }
+}
+
+impl ResourcesCreateInfo<'_> {
+    /// Returns a default `ResourcesCreateInfo`.
+    #[inline]
+    pub const fn new() -> Self {
+        Self {
             max_buffers: 1 << 24,
             max_images: 1 << 24,
             max_swapchains: 1 << 8,
             max_flights: 1 << 8,
+            bindless_context: None,
             _ne: crate::NE,
         }
     }
+}
+
+/// Specifies which types of accesses are performed on a resource.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct AccessTypes {
+    stage_mask: PipelineStages,
+    access_mask: AccessFlags,
+    image_layout: ImageLayout,
 }
 
 macro_rules! access_types {
@@ -1117,673 +1249,628 @@ macro_rules! access_types {
                 stage_mask: $($stage_flag:ident)|+,
                 access_mask: $($access_flag:ident)|+,
                 image_layout: $image_layout:ident,
-                valid_for: $($valid_for:ident)|+,
             }
         )*
     ) => {
-        /// Specifies which type of access is performed on a resource.
-        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-        #[non_exhaustive]
-        pub enum AccessType {
+        impl AccessTypes {
             $(
                 $(#[$meta])*
-                $name,
+                pub const $name: Self = AccessTypes {
+                    stage_mask: PipelineStages::empty()$(.union(PipelineStages::$stage_flag))+,
+                    access_mask: AccessFlags::empty()$(.union(AccessFlags::$access_flag))+,
+                    image_layout: ImageLayout::$image_layout,
+                };
             )*
-        }
-
-        impl AccessType {
-            /// Returns the stage mask of this type of access.
-            #[inline]
-            #[must_use]
-            pub const fn stage_mask(self) -> PipelineStages {
-                match self {
-                    $(
-                        Self::$name => PipelineStages::empty()
-                            $(.union(PipelineStages::$stage_flag))+,
-                    )*
-                }
-            }
-
-            /// Returns the access mask of this type of access.
-            #[inline]
-            #[must_use]
-            pub const fn access_mask(self) -> AccessFlags {
-                match self {
-                    $(
-                        Self::$name => AccessFlags::empty()
-                            $(.union(AccessFlags::$access_flag))+,
-                    )*
-                }
-            }
-
-            /// Returns the image layout for this type of access.
-            #[inline]
-            #[must_use]
-            pub const fn image_layout(self, layout_type: ImageLayoutType) -> ImageLayout {
-                if layout_type.is_general() {
-                    return ImageLayout::General;
-                }
-
-                match self {
-                    $(
-                        Self::$name => ImageLayout::$image_layout,
-                    )*
-                }
-            }
-
-            const fn valid_for(self) -> u8 {
-                match self {
-                    $(
-                        Self::$name => $($valid_for)|+,
-                    )*
-                }
-            }
         }
     };
 }
 
-const BUFFER: u8 = 1 << 0;
-const IMAGE: u8 = 1 << 1;
-
 access_types! {
-    IndirectCommandRead {
+    INDIRECT_COMMAND_READ {
         stage_mask: DRAW_INDIRECT,
         access_mask: INDIRECT_COMMAND_READ,
         image_layout: Undefined,
-        valid_for: BUFFER,
     }
 
-    IndexRead {
+    INDEX_READ {
         stage_mask: INDEX_INPUT,
         access_mask: INDEX_READ,
         image_layout: Undefined,
-        valid_for: BUFFER,
     }
 
-    VertexAttributeRead {
+    VERTEX_ATTRIBUTE_READ {
         stage_mask: VERTEX_ATTRIBUTE_INPUT,
         access_mask: VERTEX_ATTRIBUTE_READ,
         image_layout: Undefined,
-        valid_for: BUFFER,
     }
 
-    VertexShaderUniformRead {
+    VERTEX_SHADER_UNIFORM_READ {
         stage_mask: VERTEX_SHADER,
         access_mask: UNIFORM_READ,
         image_layout: Undefined,
-        valid_for: BUFFER,
     }
 
-    VertexShaderSampledRead {
+    VERTEX_SHADER_SAMPLED_READ {
         stage_mask: VERTEX_SHADER,
         access_mask: SHADER_SAMPLED_READ,
         image_layout: ShaderReadOnlyOptimal,
-        valid_for: BUFFER | IMAGE,
     }
 
-    VertexShaderStorageRead {
+    VERTEX_SHADER_STORAGE_READ {
         stage_mask: VERTEX_SHADER,
         access_mask: SHADER_STORAGE_READ,
         image_layout: General,
-        valid_for: BUFFER | IMAGE,
     }
 
-    VertexShaderStorageWrite {
+    VERTEX_SHADER_STORAGE_WRITE {
         stage_mask: VERTEX_SHADER,
         access_mask: SHADER_STORAGE_WRITE,
         image_layout: General,
-        valid_for: BUFFER | IMAGE,
     }
 
-    VertexShaderAccelerationStructureRead {
+    VERTEX_SHADER_ACCELERATION_STRUCTURE_READ {
         stage_mask: VERTEX_SHADER,
         access_mask: ACCELERATION_STRUCTURE_READ,
         image_layout: Undefined,
-        valid_for: BUFFER,
     }
 
-    TessellationControlShaderUniformRead {
+    TESSELLATION_CONTROL_SHADER_UNIFORM_READ {
         stage_mask: TESSELLATION_CONTROL_SHADER,
         access_mask: UNIFORM_READ,
         image_layout: Undefined,
-        valid_for: BUFFER,
     }
 
-    TessellationControlShaderSampledRead {
+    TESSELLATION_CONTROL_SHADER_SAMPLED_READ {
         stage_mask: TESSELLATION_CONTROL_SHADER,
         access_mask: SHADER_SAMPLED_READ,
         image_layout: ShaderReadOnlyOptimal,
-        valid_for: BUFFER | IMAGE,
     }
 
-    TessellationControlShaderStorageRead {
+    TESSELLATION_CONTROL_SHADER_STORAGE_READ {
         stage_mask: TESSELLATION_CONTROL_SHADER,
         access_mask: SHADER_STORAGE_READ,
         image_layout: General,
-        valid_for: BUFFER | IMAGE,
     }
 
-    TessellationControlShaderStorageWrite {
+    TESSELLATION_CONTROL_SHADER_STORAGE_WRITE {
         stage_mask: TESSELLATION_CONTROL_SHADER,
         access_mask: SHADER_STORAGE_WRITE,
         image_layout: General,
-        valid_for: BUFFER | IMAGE,
     }
 
-    TessellationControlShaderAccelerationStructureRead {
+    TESSELLATION_CONTROL_SHADER_ACCELERATION_STRUCTURE_READ {
         stage_mask: TESSELLATION_CONTROL_SHADER,
         access_mask: ACCELERATION_STRUCTURE_READ,
         image_layout: Undefined,
-        valid_for: BUFFER,
     }
 
-    TessellationEvaluationShaderUniformRead {
+    TESSELLATION_EVALUATION_SHADER_UNIFORM_READ {
         stage_mask: TESSELLATION_EVALUATION_SHADER,
         access_mask: UNIFORM_READ,
         image_layout: Undefined,
-        valid_for: BUFFER,
     }
 
-    TessellationEvaluationShaderSampledRead {
+    TESSELLATION_EVALUATION_SHADER_SAMPLED_READ {
         stage_mask: TESSELLATION_EVALUATION_SHADER,
         access_mask: SHADER_SAMPLED_READ,
         image_layout: ShaderReadOnlyOptimal,
-        valid_for: BUFFER | IMAGE,
     }
 
-    TessellationEvaluationShaderStorageRead {
+    TESSELLATION_EVALUATION_SHADER_STORAGE_READ {
         stage_mask: TESSELLATION_EVALUATION_SHADER,
         access_mask: SHADER_STORAGE_READ,
         image_layout: General,
-        valid_for: BUFFER | IMAGE,
     }
 
-    TessellationEvaluationShaderStorageWrite {
+    TESSELLATION_EVALUATION_SHADER_STORAGE_WRITE {
         stage_mask: TESSELLATION_EVALUATION_SHADER,
         access_mask: SHADER_STORAGE_WRITE,
         image_layout: General,
-        valid_for: BUFFER | IMAGE,
     }
 
-    TessellationEvaluationShaderAccelerationStructureRead {
+    TESSELLATION_EVALUATION_SHADER_ACCELERATION_STRUCTURE_READ {
         stage_mask: TESSELLATION_EVALUATION_SHADER,
         access_mask: ACCELERATION_STRUCTURE_READ,
         image_layout: Undefined,
-        valid_for: BUFFER,
     }
 
-    GeometryShaderUniformRead {
+    GEOMETRY_SHADER_UNIFORM_READ {
         stage_mask: GEOMETRY_SHADER,
         access_mask: UNIFORM_READ,
         image_layout: Undefined,
-        valid_for: BUFFER,
     }
 
-    GeometryShaderSampledRead {
+    GEOMETRY_SHADER_SAMPLED_READ {
         stage_mask: GEOMETRY_SHADER,
         access_mask: SHADER_SAMPLED_READ,
         image_layout: ShaderReadOnlyOptimal,
-        valid_for: BUFFER | IMAGE,
     }
 
-    GeometryShaderStorageRead {
+    GEOMETRY_SHADER_STORAGE_READ {
         stage_mask: GEOMETRY_SHADER,
         access_mask: SHADER_STORAGE_READ,
         image_layout: General,
-        valid_for: BUFFER | IMAGE,
     }
 
-    GeometryShaderStorageWrite {
+    GEOMETRY_SHADER_STORAGE_WRITE {
         stage_mask: GEOMETRY_SHADER,
         access_mask: SHADER_STORAGE_WRITE,
         image_layout: General,
-        valid_for: BUFFER | IMAGE,
     }
 
-    GeometryShaderAccelerationStructureRead {
+    GEOMETRY_SHADER_ACCELERATION_STRUCTURE_READ {
         stage_mask: GEOMETRY_SHADER,
         access_mask: ACCELERATION_STRUCTURE_READ,
         image_layout: Undefined,
-        valid_for: BUFFER,
     }
 
-    FragmentShaderUniformRead {
+    FRAGMENT_SHADER_UNIFORM_READ {
         stage_mask: FRAGMENT_SHADER,
         access_mask: UNIFORM_READ,
         image_layout: Undefined,
-        valid_for: BUFFER,
     }
 
-    FragmentShaderColorInputAttachmentRead {
+    FRAGMENT_SHADER_COLOR_INPUT_ATTACHMENT_READ {
         stage_mask: FRAGMENT_SHADER,
         access_mask: INPUT_ATTACHMENT_READ,
         image_layout: ShaderReadOnlyOptimal,
-        valid_for: IMAGE,
     }
 
-    FragmentShaderDepthStencilInputAttachmentRead {
+    FRAGMENT_SHADER_DEPTH_STENCIL_INPUT_ATTACHMENT_READ {
         stage_mask: FRAGMENT_SHADER,
         access_mask: INPUT_ATTACHMENT_READ,
         image_layout: DepthStencilReadOnlyOptimal,
-        valid_for: IMAGE,
     }
 
-    FragmentShaderSampledRead {
+    FRAGMENT_SHADER_SAMPLED_READ {
         stage_mask: FRAGMENT_SHADER,
         access_mask: SHADER_SAMPLED_READ,
         image_layout: ShaderReadOnlyOptimal,
-        valid_for: BUFFER | IMAGE,
     }
 
-    FragmentShaderStorageRead {
+    FRAGMENT_SHADER_STORAGE_READ {
         stage_mask: FRAGMENT_SHADER,
         access_mask: SHADER_STORAGE_READ,
         image_layout: General,
-        valid_for: BUFFER | IMAGE,
     }
 
-    FragmentShaderStorageWrite {
+    FRAGMENT_SHADER_STORAGE_WRITE {
         stage_mask: FRAGMENT_SHADER,
         access_mask: SHADER_STORAGE_WRITE,
         image_layout: General,
-        valid_for: BUFFER | IMAGE,
     }
 
-    FragmentShaderAccelerationStructureRead {
+    FRAGMENT_SHADER_ACCELERATION_STRUCTURE_READ {
         stage_mask: FRAGMENT_SHADER,
         access_mask: ACCELERATION_STRUCTURE_READ,
         image_layout: Undefined,
-        valid_for: BUFFER,
     }
 
-    DepthStencilAttachmentRead {
+    DEPTH_STENCIL_ATTACHMENT_READ {
         stage_mask: EARLY_FRAGMENT_TESTS | LATE_FRAGMENT_TESTS,
         access_mask: DEPTH_STENCIL_ATTACHMENT_READ,
         image_layout: DepthStencilReadOnlyOptimal,
-        valid_for: IMAGE,
     }
 
-    DepthStencilAttachmentWrite {
+    DEPTH_STENCIL_ATTACHMENT_WRITE {
         stage_mask: EARLY_FRAGMENT_TESTS | LATE_FRAGMENT_TESTS,
         access_mask: DEPTH_STENCIL_ATTACHMENT_WRITE,
         image_layout: DepthStencilAttachmentOptimal,
-        valid_for: IMAGE,
     }
 
-    DepthAttachmentWriteStencilReadOnly {
+    DEPTH_ATTACHMENT_WRITE_STENCIL_READ_ONLY {
         stage_mask: EARLY_FRAGMENT_TESTS | LATE_FRAGMENT_TESTS,
         access_mask: DEPTH_STENCIL_ATTACHMENT_READ | DEPTH_STENCIL_ATTACHMENT_WRITE,
         image_layout: DepthAttachmentStencilReadOnlyOptimal,
-        valid_for: IMAGE,
     }
 
-    DepthReadOnlyStencilAttachmentWrite {
+    DEPTH_READ_ONLY_STENCIL_ATTACHMENT_WRITE {
         stage_mask: EARLY_FRAGMENT_TESTS | LATE_FRAGMENT_TESTS,
         access_mask: DEPTH_STENCIL_ATTACHMENT_READ | DEPTH_STENCIL_ATTACHMENT_WRITE,
         image_layout: DepthReadOnlyStencilAttachmentOptimal,
-        valid_for: IMAGE,
     }
 
-    ColorAttachmentRead {
+    COLOR_ATTACHMENT_READ {
         stage_mask: COLOR_ATTACHMENT_OUTPUT,
         access_mask: COLOR_ATTACHMENT_READ,
         image_layout: ColorAttachmentOptimal,
-        valid_for: IMAGE,
     }
 
-    ColorAttachmentWrite {
+    COLOR_ATTACHMENT_WRITE {
         stage_mask: COLOR_ATTACHMENT_OUTPUT,
         access_mask: COLOR_ATTACHMENT_WRITE,
         image_layout: ColorAttachmentOptimal,
-        valid_for: IMAGE,
     }
 
-    ComputeShaderUniformRead {
+    COMPUTE_SHADER_UNIFORM_READ {
         stage_mask: COMPUTE_SHADER,
         access_mask: UNIFORM_READ,
         image_layout: Undefined,
-        valid_for: BUFFER,
     }
 
-    ComputeShaderSampledRead {
+    COMPUTE_SHADER_SAMPLED_READ {
         stage_mask: COMPUTE_SHADER,
         access_mask: SHADER_SAMPLED_READ,
         image_layout: ShaderReadOnlyOptimal,
-        valid_for: BUFFER | IMAGE,
     }
 
-    ComputeShaderStorageRead {
+    COMPUTE_SHADER_STORAGE_READ {
         stage_mask: COMPUTE_SHADER,
         access_mask: SHADER_STORAGE_READ,
         image_layout: General,
-        valid_for: BUFFER | IMAGE,
     }
 
-    ComputeShaderStorageWrite {
+    COMPUTE_SHADER_STORAGE_WRITE {
         stage_mask: COMPUTE_SHADER,
         access_mask: SHADER_STORAGE_WRITE,
         image_layout: General,
-        valid_for: BUFFER | IMAGE,
     }
 
-    ComputeShaderAccelerationStructureRead {
+    COMPUTE_SHADER_ACCELERATION_STRUCTURE_READ {
         stage_mask: COMPUTE_SHADER,
         access_mask: ACCELERATION_STRUCTURE_READ,
         image_layout: Undefined,
-        valid_for: BUFFER,
     }
 
-    CopyTransferRead {
+    COPY_TRANSFER_READ {
         stage_mask: COPY,
         access_mask: TRANSFER_READ,
         image_layout: TransferSrcOptimal,
-        valid_for: BUFFER | IMAGE,
     }
 
-    CopyTransferWrite {
+    COPY_TRANSFER_WRITE {
         stage_mask: COPY,
         access_mask: TRANSFER_WRITE,
         image_layout: TransferDstOptimal,
-        valid_for: BUFFER | IMAGE,
     }
 
-    BlitTransferRead {
+    BLIT_TRANSFER_READ {
         stage_mask: BLIT,
         access_mask: TRANSFER_READ,
         image_layout: TransferSrcOptimal,
-        valid_for: IMAGE,
     }
 
-    BlitTransferWrite {
+    BLIT_TRANSFER_WRITE {
         stage_mask: BLIT,
         access_mask: TRANSFER_WRITE,
         image_layout: TransferDstOptimal,
-        valid_for: IMAGE,
     }
 
-    ResolveTransferRead {
+    RESOLVE_TRANSFER_READ {
         stage_mask: RESOLVE,
         access_mask: TRANSFER_READ,
         image_layout: TransferSrcOptimal,
-        valid_for: IMAGE,
     }
 
-    ResolveTransferWrite {
+    RESOLVE_TRANSFER_WRITE {
         stage_mask: RESOLVE,
         access_mask: TRANSFER_WRITE,
         image_layout: TransferDstOptimal,
-        valid_for: IMAGE,
     }
 
-    ClearTransferWrite {
+    CLEAR_TRANSFER_WRITE {
         stage_mask: CLEAR,
         access_mask: TRANSFER_WRITE,
         image_layout: TransferDstOptimal,
-        valid_for: IMAGE,
     }
 
-    AccelerationStructureCopyTransferRead {
+    ACCELERATION_STRUCTURE_COPY_TRANSFER_READ {
         stage_mask: ACCELERATION_STRUCTURE_COPY,
         access_mask: TRANSFER_READ,
         image_layout: Undefined,
-        valid_for: BUFFER,
     }
 
-    AccelerationStructureCopyTransferWrite {
+    ACCELERATION_STRUCTURE_COPY_TRANSFER_WRITE {
         stage_mask: ACCELERATION_STRUCTURE_COPY,
         access_mask: TRANSFER_WRITE,
         image_layout: Undefined,
-        valid_for: BUFFER,
     }
 
     // TODO:
-    // VideoDecodeRead {
+    // VIDEO_DECODE_READ {
     //     stage_mask: VIDEO_DECODE,
     //     access_mask: VIDEO_DECODE_READ,
     //     image_layout: Undefined,
-    //     valid_for: BUFFER,
     // }
 
     // TODO:
-    // VideoDecodeWrite {
+    // VIDEO_DECODE_WRITE {
     //     stage_mask: VIDEO_DECODE,
     //     access_mask: VIDEO_DECODE_WRITE,
     //     image_layout: VideoDecodeDst,
-    //     valid_for: IMAGE,
     // }
 
     // TODO:
-    // VideoDecodeDpbRead {
+    // VIDEO_DECODE_DPB_READ {
     //     stage_mask: VIDEO_DECODE,
     //     access_mask: VIDEO_DECODE_READ,
     //     image_layout: VideoDecodeDpb,
-    //     valid_for: IMAGE,
     // }
 
     // TODO:
-    // VideoDecodeDpbWrite {
+    // VIDEO_DECODE_DPB_WRITE {
     //     stage_mask: VIDEO_DECODE,
     //     access_mask: VIDEO_DECODE_WRITE,
     //     image_layout: VideoDecodeDpb,
-    //     valid_for: IMAGE,
     // }
 
     // TODO:
-    // VideoEncodeRead {
+    // VIDEO_ENCODE_READ {
     //     stage_mask: VIDEO_ENCODE,
     //     access_mask: VIDEO_ENCODE_READ,
     //     image_layout: VideoEncodeSrc,
-    //     valid_for: IMAGE,
     // }
 
     // TODO:
-    // VideoEncodeWrite {
+    // VIDEO_ENCODE_WRITE {
     //     stage_mask: VIDEO_ENCODE,
     //     access_mask: VIDEO_ENCODE_WRITE,
     //     image_layout: Undefined,
-    //     valid_for: BUFFER,
     // }
 
     // TODO:
-    // VideoEncodeDpbRead {
+    // VIDEO_ENCODE_DPB_READ {
     //     stage_mask: VIDEO_ENCODE,
     //     access_mask: VIDEO_ENCODE_READ,
     //     image_layout: VideoEncodeDpb,
-    //     valid_for: IMAGE,
     // }
 
     // TODO:
-    // VideoEncodeDpbWrite {
+    // VIDEO_ENCODE_DPB_WRITE {
     //     stage_mask: VIDEO_ENCODE,
     //     access_mask: VIDEO_ENCODE_WRITE,
     //     image_layout: VideoEncodeDpb,
-    //     valid_for: IMAGE,
     // }
 
-    RayTracingShaderUniformRead {
+    RAY_TRACING_SHADER_UNIFORM_READ {
         stage_mask: RAY_TRACING_SHADER,
         access_mask: UNIFORM_READ,
         image_layout: Undefined,
-        valid_for: BUFFER,
     }
 
-    RayTracingShaderColorInputAttachmentRead {
-        stage_mask: RAY_TRACING_SHADER,
-        access_mask: INPUT_ATTACHMENT_READ,
-        image_layout: ShaderReadOnlyOptimal,
-        valid_for: IMAGE,
-    }
-
-    RayTracingShaderDepthStencilInputAttachmentRead {
-        stage_mask: RAY_TRACING_SHADER,
-        access_mask: INPUT_ATTACHMENT_READ,
-        image_layout: DepthStencilReadOnlyOptimal,
-        valid_for: IMAGE,
-    }
-
-    RayTracingShaderSampledRead {
+    RAY_TRACING_SHADER_SAMPLED_READ {
         stage_mask: RAY_TRACING_SHADER,
         access_mask: SHADER_SAMPLED_READ,
         image_layout: ShaderReadOnlyOptimal,
-        valid_for: BUFFER | IMAGE,
     }
 
-    RayTracingShaderStorageRead {
+    RAY_TRACING_SHADER_STORAGE_READ {
         stage_mask: RAY_TRACING_SHADER,
         access_mask: SHADER_STORAGE_READ,
         image_layout: General,
-        valid_for: BUFFER | IMAGE,
     }
 
-    RayTracingShaderStorageWrite {
+    RAY_TRACING_SHADER_STORAGE_WRITE {
         stage_mask: RAY_TRACING_SHADER,
         access_mask: SHADER_STORAGE_WRITE,
         image_layout: General,
-        valid_for: BUFFER | IMAGE,
     }
 
-    RayTracingShaderBindingTableRead {
+    RAY_TRACING_SHADER_BINDING_TABLE_READ {
         stage_mask: RAY_TRACING_SHADER,
         access_mask: SHADER_BINDING_TABLE_READ,
         image_layout: Undefined,
-        valid_for: BUFFER,
     }
 
-    RayTracingShaderAccelerationStructureRead {
+    RAY_TRACING_SHADER_ACCELERATION_STRUCTURE_READ {
         stage_mask: RAY_TRACING_SHADER,
         access_mask: ACCELERATION_STRUCTURE_READ,
         image_layout: Undefined,
-        valid_for: BUFFER,
     }
 
-    TaskShaderUniformRead {
+    TASK_SHADER_UNIFORM_READ {
         stage_mask: TASK_SHADER,
         access_mask: UNIFORM_READ,
         image_layout: Undefined,
-        valid_for: BUFFER,
     }
 
-    TaskShaderSampledRead {
+    TASK_SHADER_SAMPLED_READ {
         stage_mask: TASK_SHADER,
         access_mask: SHADER_SAMPLED_READ,
         image_layout: ShaderReadOnlyOptimal,
-        valid_for: BUFFER | IMAGE,
     }
 
-    TaskShaderStorageRead {
+    TASK_SHADER_STORAGE_READ {
         stage_mask: TASK_SHADER,
         access_mask: SHADER_STORAGE_READ,
         image_layout: General,
-        valid_for: BUFFER | IMAGE,
     }
 
-    TaskShaderStorageWrite {
+    TASK_SHADER_STORAGE_WRITE {
         stage_mask: TASK_SHADER,
         access_mask: SHADER_STORAGE_WRITE,
         image_layout: General,
-        valid_for: BUFFER | IMAGE,
     }
 
-    TaskShaderAccelerationStructureRead {
+    TASK_SHADER_ACCELERATION_STRUCTURE_READ {
         stage_mask: TASK_SHADER,
         access_mask: ACCELERATION_STRUCTURE_READ,
         image_layout: Undefined,
-        valid_for: BUFFER,
     }
 
-    MeshShaderUniformRead {
+    MESH_SHADER_UNIFORM_READ {
         stage_mask: MESH_SHADER,
         access_mask: UNIFORM_READ,
         image_layout: Undefined,
-        valid_for: BUFFER,
     }
 
-    MeshShaderSampledRead {
+    MESH_SHADER_SAMPLED_READ {
         stage_mask: MESH_SHADER,
         access_mask: SHADER_SAMPLED_READ,
         image_layout: ShaderReadOnlyOptimal,
-        valid_for: BUFFER | IMAGE,
     }
 
-    MeshShaderStorageRead {
+    MESH_SHADER_STORAGE_READ {
         stage_mask: MESH_SHADER,
         access_mask: SHADER_STORAGE_READ,
         image_layout: General,
-        valid_for: BUFFER | IMAGE,
     }
 
-    MeshShaderStorageWrite {
+    MESH_SHADER_STORAGE_WRITE {
         stage_mask: MESH_SHADER,
         access_mask: SHADER_STORAGE_WRITE,
         image_layout: General,
-        valid_for: BUFFER | IMAGE,
     }
 
-    MeshShaderAccelerationStructureRead {
+    MESH_SHADER_ACCELERATION_STRUCTURE_READ {
         stage_mask: MESH_SHADER,
         access_mask: ACCELERATION_STRUCTURE_READ,
         image_layout: Undefined,
-        valid_for: BUFFER,
     }
 
-    AccelerationStructureBuildIndirectCommandRead {
+    ACCELERATION_STRUCTURE_BUILD_INDIRECT_COMMAND_READ {
         stage_mask: ACCELERATION_STRUCTURE_BUILD,
         access_mask: INDIRECT_COMMAND_READ,
         image_layout: Undefined,
-        valid_for: BUFFER,
     }
 
-    AccelerationStructureBuildShaderRead {
+    ACCELERATION_STRUCTURE_BUILD_SHADER_READ {
         stage_mask: ACCELERATION_STRUCTURE_BUILD,
         access_mask: SHADER_READ,
         image_layout: Undefined,
-        valid_for: BUFFER,
     }
 
-    AccelerationStructureBuildAccelerationStructureRead {
+    ACCELERATION_STRUCTURE_BUILD_ACCELERATION_STRUCTURE_READ {
         stage_mask: ACCELERATION_STRUCTURE_BUILD,
         access_mask: ACCELERATION_STRUCTURE_READ,
         image_layout: Undefined,
-        valid_for: BUFFER,
     }
 
-    AccelerationStructureBuildAccelerationStructureWrite {
+    ACCELERATION_STRUCTURE_BUILD_ACCELERATION_STRUCTURE_WRITE {
         stage_mask: ACCELERATION_STRUCTURE_BUILD,
         access_mask: ACCELERATION_STRUCTURE_WRITE,
         image_layout: Undefined,
-        valid_for: BUFFER,
     }
 
-    AccelerationStructureCopyAccelerationStructureRead {
+    ACCELERATION_STRUCTURE_COPY_ACCELERATION_STRUCTURE_READ {
         stage_mask: ACCELERATION_STRUCTURE_COPY,
         access_mask: ACCELERATION_STRUCTURE_READ,
         image_layout: Undefined,
-        valid_for: BUFFER,
     }
 
-    AccelerationStructureCopyAccelerationStructureWrite {
+    ACCELERATION_STRUCTURE_COPY_ACCELERATION_STRUCTURE_WRITE {
         stage_mask: ACCELERATION_STRUCTURE_COPY,
         access_mask: ACCELERATION_STRUCTURE_WRITE,
         image_layout: Undefined,
-        valid_for: BUFFER,
     }
 
     /// Only use this for prototyping or debugging please. 🔫 Please. 🔫
-    General {
+    GENERAL {
         stage_mask: ALL_COMMANDS,
         access_mask: MEMORY_READ | MEMORY_WRITE,
         image_layout: General,
-        valid_for: BUFFER | IMAGE,
     }
 }
 
-impl AccessType {
-    pub(crate) const fn is_valid_buffer_access_type(self) -> bool {
-        self.valid_for() & BUFFER != 0
+impl AccessTypes {
+    /// Returns the stage mask of these types of accesses.
+    #[inline]
+    #[must_use]
+    pub const fn stage_mask(&self) -> PipelineStages {
+        self.stage_mask
     }
 
-    pub(crate) const fn is_valid_image_access_type(self) -> bool {
-        self.valid_for() & IMAGE != 0
+    /// Returns the access mask of these types of accesses.
+    #[inline]
+    #[must_use]
+    pub const fn access_mask(&self) -> AccessFlags {
+        self.access_mask
+    }
+
+    /// Returns the image layout of these types of accesses.
+    #[inline]
+    #[must_use]
+    pub const fn image_layout(&self, layout_type: ImageLayoutType) -> ImageLayout {
+        if layout_type.is_optimal() {
+            self.image_layout
+        } else {
+            ImageLayout::General
+        }
+    }
+
+    /// Returns the union of `self` and `other`.
+    ///
+    /// If the image layouts don't match, [`ImageLayout::General`] is used.
+    #[inline]
+    #[must_use]
+    pub const fn union(self, other: Self) -> Self {
+        AccessTypes {
+            stage_mask: self.stage_mask.union(other.stage_mask),
+            access_mask: self.access_mask.union(other.access_mask),
+            image_layout: if self.image_layout as i32 == other.image_layout as i32 {
+                self.image_layout
+            } else {
+                ImageLayout::General
+            },
+        }
+    }
+
+    pub(crate) const fn are_valid_buffer_access_types(self) -> bool {
+        const VALID_STAGE_FLAGS: PipelineStages = PipelineStages::DRAW_INDIRECT
+            .union(PipelineStages::VERTEX_SHADER)
+            .union(PipelineStages::TESSELLATION_CONTROL_SHADER)
+            .union(PipelineStages::TESSELLATION_EVALUATION_SHADER)
+            .union(PipelineStages::GEOMETRY_SHADER)
+            .union(PipelineStages::FRAGMENT_SHADER)
+            .union(PipelineStages::COMPUTE_SHADER)
+            .union(PipelineStages::ALL_COMMANDS)
+            .union(PipelineStages::COPY)
+            .union(PipelineStages::INDEX_INPUT)
+            .union(PipelineStages::VERTEX_ATTRIBUTE_INPUT)
+            .union(PipelineStages::VIDEO_DECODE)
+            .union(PipelineStages::VIDEO_ENCODE)
+            .union(PipelineStages::ACCELERATION_STRUCTURE_BUILD)
+            .union(PipelineStages::RAY_TRACING_SHADER)
+            .union(PipelineStages::TASK_SHADER)
+            .union(PipelineStages::MESH_SHADER)
+            .union(PipelineStages::ACCELERATION_STRUCTURE_COPY);
+        const VALID_ACCESS_FLAGS: AccessFlags = AccessFlags::INDIRECT_COMMAND_READ
+            .union(AccessFlags::INDEX_READ)
+            .union(AccessFlags::VERTEX_ATTRIBUTE_READ)
+            .union(AccessFlags::UNIFORM_READ)
+            .union(AccessFlags::TRANSFER_READ)
+            .union(AccessFlags::TRANSFER_WRITE)
+            .union(AccessFlags::MEMORY_READ)
+            .union(AccessFlags::MEMORY_WRITE)
+            .union(AccessFlags::SHADER_SAMPLED_READ)
+            .union(AccessFlags::SHADER_STORAGE_READ)
+            .union(AccessFlags::SHADER_STORAGE_WRITE)
+            .union(AccessFlags::VIDEO_DECODE_READ)
+            .union(AccessFlags::VIDEO_ENCODE_WRITE)
+            .union(AccessFlags::ACCELERATION_STRUCTURE_READ)
+            .union(AccessFlags::ACCELERATION_STRUCTURE_WRITE)
+            .union(AccessFlags::SHADER_BINDING_TABLE_READ);
+
+        VALID_STAGE_FLAGS.contains(self.stage_mask)
+            && VALID_ACCESS_FLAGS.contains(self.access_mask)
+            && matches!(
+                self.image_layout,
+                ImageLayout::Undefined
+                    | ImageLayout::General
+                    | ImageLayout::ShaderReadOnlyOptimal
+                    | ImageLayout::TransferSrcOptimal
+                    | ImageLayout::TransferDstOptimal,
+            )
+    }
+
+    pub(crate) const fn are_valid_image_access_types(self) -> bool {
+        !matches!(self.image_layout, ImageLayout::Undefined)
+    }
+}
+
+impl BitOr for AccessTypes {
+    type Output = Self;
+
+    #[inline]
+    fn bitor(self, rhs: Self) -> Self::Output {
+        self.union(rhs)
+    }
+}
+
+impl BitOrAssign for AccessTypes {
+    #[inline]
+    fn bitor_assign(&mut self, rhs: Self) {
+        *self = self.union(rhs);
     }
 }
 

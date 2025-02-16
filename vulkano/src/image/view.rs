@@ -20,8 +20,9 @@ use crate::{
     Requires, RequiresAllOf, RequiresOneOf, Validated, ValidationError, Version, VulkanError,
     VulkanObject,
 };
+use ash::vk;
 use smallvec::{smallvec, SmallVec};
-use std::{fmt::Debug, hash::Hash, mem::MaybeUninit, num::NonZeroU64, ptr, sync::Arc};
+use std::{fmt::Debug, hash::Hash, mem::MaybeUninit, num::NonZero, ptr, sync::Arc};
 
 /// A wrapper around an image that makes it available to shaders or framebuffers.
 ///
@@ -30,9 +31,9 @@ use std::{fmt::Debug, hash::Hash, mem::MaybeUninit, num::NonZeroU64, ptr, sync::
 /// [the parent module-level documentation]: super
 #[derive(Debug)]
 pub struct ImageView {
-    handle: ash::vk::ImageView,
+    handle: vk::ImageView,
     image: DeviceOwnedDebugWrapper<Arc<Image>>,
-    id: NonZeroU64,
+    id: NonZero<u64>,
 
     view_type: ImageViewType,
     format: Format,
@@ -127,6 +128,17 @@ impl ImageView {
         if matches!(view_type, ImageViewType::Dim2d | ImageViewType::Dim2dArray)
             && image_type == ImageType::Dim3d
         {
+            if image.flags().intersects(ImageCreateFlags::SPARSE_BINDING) {
+                return Err(Box::new(ValidationError {
+                    problem: "`create_info.view_type` is `ImageViewType::Dim2d` or \
+                        `ImageViewType::Dim2d`, and `image.image_type()` is `ImageType::Dim3d`, \
+                        but `image.flags()` contains `ImageCreateFlags::SPARSE_BINDING`"
+                        .into(),
+                    vuids: &["VUID-VkImageViewCreateInfo-image-04971"],
+                    ..Default::default()
+                }));
+            }
+
             match view_type {
                 ImageViewType::Dim2d => {
                     if !image
@@ -565,18 +577,20 @@ impl ImageView {
             let device = image.device();
             let fns = device.fns();
             let mut output = MaybeUninit::uninit();
-            (fns.v1_0.create_image_view)(
-                device.handle(),
-                &create_info_vk,
-                ptr::null(),
-                output.as_mut_ptr(),
-            )
+            unsafe {
+                (fns.v1_0.create_image_view)(
+                    device.handle(),
+                    &create_info_vk,
+                    ptr::null(),
+                    output.as_mut_ptr(),
+                )
+            }
             .result()
             .map_err(VulkanError::from)?;
-            output.assume_init()
+            unsafe { output.assume_init() }
         };
 
-        Self::from_handle(image, handle, create_info)
+        unsafe { Self::from_handle(image, handle, create_info) }
     }
 
     /// Creates a default `ImageView`. Equivalent to
@@ -595,7 +609,7 @@ impl ImageView {
     /// - `create_info` must match the info used to create the object.
     pub unsafe fn from_handle(
         image: Arc<Image>,
-        handle: ash::vk::ImageView,
+        handle: vk::ImageView,
         create_info: ImageViewCreateInfo,
     ) -> Result<Arc<Self>, VulkanError> {
         let ImageViewCreateInfo {
@@ -614,7 +628,7 @@ impl ImageView {
             usage = get_implicit_default_usage(subresource_range.aspects, &image);
         }
 
-        let format_features = get_format_features(format, &image);
+        let format_features = unsafe { get_format_features(format, &image) };
 
         let mut filter_cubic = false;
         let mut filter_cubic_minmax = false;
@@ -626,7 +640,7 @@ impl ImageView {
         {
             // Use unchecked, because all validation has been done above or is validated by the
             // image.
-            let properties =
+            let properties = unsafe {
                 device
                     .physical_device()
                     .image_format_properties_unchecked(ImageFormatInfo {
@@ -637,7 +651,8 @@ impl ImageView {
                         usage: image.usage(),
                         image_view_type: Some(view_type),
                         ..Default::default()
-                    })?;
+                    })
+            }?;
 
             if let Some(properties) = properties {
                 filter_cubic = properties.filter_cubic;
@@ -736,7 +751,7 @@ impl Drop for ImageView {
 }
 
 unsafe impl VulkanObject for ImageView {
-    type Handle = ash::vk::ImageView;
+    type Handle = vk::ImageView;
 
     #[inline]
     fn handle(&self) -> Self::Handle {
@@ -829,6 +844,14 @@ pub struct ImageViewCreateInfo {
 impl Default for ImageViewCreateInfo {
     #[inline]
     fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ImageViewCreateInfo {
+    /// Returns a default `ImageViewCreateInfo`.
+    #[inline]
+    pub const fn new() -> Self {
         Self {
             view_type: ImageViewType::Dim2d,
             format: Format::UNDEFINED,
@@ -843,9 +866,7 @@ impl Default for ImageViewCreateInfo {
             _ne: crate::NonExhaustive(()),
         }
     }
-}
 
-impl ImageViewCreateInfo {
     /// Returns an `ImageViewCreateInfo` with the `view_type` determined from the image type and
     /// array layers, and `subresource_range` determined from the image format and covering the
     /// whole image.
@@ -1022,9 +1043,9 @@ impl ImageViewCreateInfo {
 
     pub(crate) fn to_vk<'a>(
         &self,
-        image_vk: ash::vk::Image,
+        image_vk: vk::Image,
         extensions_vk: &'a mut ImageViewCreateInfoExtensionsVk,
-    ) -> ash::vk::ImageViewCreateInfo<'a> {
+    ) -> vk::ImageViewCreateInfo<'a> {
         let &Self {
             view_type,
             format,
@@ -1035,8 +1056,8 @@ impl ImageViewCreateInfo {
             _ne: _,
         } = self;
 
-        let mut val_vk = ash::vk::ImageViewCreateInfo::default()
-            .flags(ash::vk::ImageViewCreateFlags::empty())
+        let mut val_vk = vk::ImageViewCreateInfo::default()
+            .flags(vk::ImageViewCreateFlags::empty())
             .image(image_vk)
             .view_type(view_type.into())
             .format(format.into())
@@ -1070,12 +1091,12 @@ impl ImageViewCreateInfo {
         } = self;
 
         let sampler_ycbcr_conversion_vk = sampler_ycbcr_conversion.as_ref().map(|conversion| {
-            ash::vk::SamplerYcbcrConversionInfo::default().conversion(conversion.handle())
+            vk::SamplerYcbcrConversionInfo::default().conversion(conversion.handle())
         });
 
         let has_non_default_usage = !(usage.is_empty() || usage == implicit_default_usage);
         let usage_vk = has_non_default_usage
-            .then(|| ash::vk::ImageViewUsageCreateInfo::default().usage(usage.into()));
+            .then(|| vk::ImageViewUsageCreateInfo::default().usage(usage.into()));
 
         ImageViewCreateInfoExtensionsVk {
             sampler_ycbcr_conversion_vk,
@@ -1085,8 +1106,8 @@ impl ImageViewCreateInfo {
 }
 
 pub(crate) struct ImageViewCreateInfoExtensionsVk {
-    pub(crate) sampler_ycbcr_conversion_vk: Option<ash::vk::SamplerYcbcrConversionInfo<'static>>,
-    pub(crate) usage_vk: Option<ash::vk::ImageViewUsageCreateInfo<'static>>,
+    pub(crate) sampler_ycbcr_conversion_vk: Option<vk::SamplerYcbcrConversionInfo<'static>>,
+    pub(crate) usage_vk: Option<vk::ImageViewUsageCreateInfo<'static>>,
 }
 
 vulkan_enum! {
@@ -1171,9 +1192,11 @@ unsafe fn get_format_features(view_format: Format, image: &Image) -> FormatFeatu
 
     let mut format_features = {
         // Use unchecked, because all validation should have been done before calling.
-        let format_properties = device
-            .physical_device()
-            .format_properties_unchecked(view_format);
+        let format_properties = unsafe {
+            device
+                .physical_device()
+                .format_properties_unchecked(view_format)
+        };
         let drm_format_modifiers: SmallVec<[_; 1]> = image
             .drm_format_modifier()
             .map_or_else(Default::default, |(m, _)| smallvec![m]);

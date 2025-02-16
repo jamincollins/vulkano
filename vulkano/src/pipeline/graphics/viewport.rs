@@ -39,6 +39,7 @@
 //! In all cases the number of viewports and scissor boxes must be the same.
 
 use crate::{device::Device, Requires, RequiresAllOf, RequiresOneOf, ValidationError, Version};
+use ash::vk;
 use smallvec::{smallvec, SmallVec};
 use std::ops::RangeInclusive;
 
@@ -87,22 +88,18 @@ pub struct ViewportState {
 impl Default for ViewportState {
     #[inline]
     fn default() -> Self {
-        Self {
-            viewports: smallvec![Viewport::default()],
-            scissors: smallvec![Scissor::default()],
-            _ne: crate::NonExhaustive(()),
-        }
+        Self::new()
     }
 }
 
 impl ViewportState {
-    /// Creates a `ViewportState` with fixed state and no viewports or scissors.
-    #[deprecated(since = "0.34.0")]
+    /// Returns a default `ViewportState`.
+    // TODO: make const
     #[inline]
     pub fn new() -> Self {
         Self {
-            viewports: SmallVec::new(),
-            scissors: SmallVec::new(),
+            viewports: smallvec![Viewport::default()],
+            scissors: smallvec![Scissor::default()],
             _ne: crate::NonExhaustive(()),
         }
     }
@@ -229,14 +226,14 @@ impl ViewportState {
     pub(crate) fn to_vk<'a>(
         &self,
         fields1_vk: &'a ViewportStateFields1Vk,
-    ) -> ash::vk::PipelineViewportStateCreateInfo<'a> {
+    ) -> vk::PipelineViewportStateCreateInfo<'a> {
         let ViewportStateFields1Vk {
             viewports_vk,
             scissors_vk,
         } = fields1_vk;
 
-        let mut val_vk = ash::vk::PipelineViewportStateCreateInfo::default()
-            .flags(ash::vk::PipelineViewportStateCreateFlags::empty());
+        let mut val_vk = vk::PipelineViewportStateCreateInfo::default()
+            .flags(vk::PipelineViewportStateCreateFlags::empty());
 
         if !viewports_vk.is_empty() {
             val_vk = val_vk.viewports(viewports_vk);
@@ -267,8 +264,8 @@ impl ViewportState {
 }
 
 pub(crate) struct ViewportStateFields1Vk {
-    pub(crate) viewports_vk: SmallVec<[ash::vk::Viewport; 2]>,
-    pub(crate) scissors_vk: SmallVec<[ash::vk::Rect2D; 2]>,
+    pub(crate) viewports_vk: SmallVec<[vk::Viewport; 2]>,
+    pub(crate) scissors_vk: SmallVec<[vk::Rect2D; 2]>,
 }
 
 /// State of a single viewport.
@@ -300,15 +297,21 @@ pub struct Viewport {
 impl Default for Viewport {
     #[inline]
     fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Viewport {
+    /// Returns a default `Viewport`.
+    #[inline]
+    pub const fn new() -> Self {
         Self {
             offset: [0.0; 2],
             extent: [1.0; 2],
             depth_range: 0.0..=1.0,
         }
     }
-}
 
-impl Viewport {
     pub(crate) fn validate(&self, device: &Device) -> Result<(), Box<ValidationError>> {
         let &Self {
             offset,
@@ -443,14 +446,14 @@ impl Viewport {
     }
 
     #[doc(hidden)]
-    pub fn to_vk(&self) -> ash::vk::Viewport {
+    pub fn to_vk(&self) -> vk::Viewport {
         let &Self {
             offset,
             extent,
             ref depth_range,
         } = self;
 
-        ash::vk::Viewport {
+        vk::Viewport {
             x: offset[0],
             y: offset[1],
             width: extent[0],
@@ -477,34 +480,40 @@ pub struct Scissor {
 
 impl Default for Scissor {
     #[inline]
-    fn default() -> Scissor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Scissor {
+    /// Returns a default `Scissor`.
+    #[inline]
+    pub const fn new() -> Self {
         Self {
             offset: [0; 2],
             extent: [i32::MAX as u32; 2],
         }
     }
-}
 
-impl Scissor {
     /// Returns a scissor that, when used, will instruct the pipeline to draw to the entire
     /// framebuffer no matter its size.
-    #[deprecated(since = "0.34.0", note = "use `Scissor::default` instead")]
+    #[deprecated(since = "0.34.0", note = "use `Scissor::new` instead")]
     #[inline]
     pub fn irrelevant() -> Scissor {
-        Self::default()
+        Self::new()
     }
 
     #[allow(clippy::wrong_self_convention)]
     #[doc(hidden)]
-    pub fn to_vk(&self) -> ash::vk::Rect2D {
+    pub fn to_vk(&self) -> vk::Rect2D {
         let &Self { offset, extent } = self;
 
-        ash::vk::Rect2D {
-            offset: ash::vk::Offset2D {
+        vk::Rect2D {
+            offset: vk::Offset2D {
                 x: offset[0] as i32,
                 y: offset[1] as i32,
             },
-            extent: ash::vk::Extent2D {
+            extent: vk::Extent2D {
                 width: extent[0],
                 height: extent[1],
             },

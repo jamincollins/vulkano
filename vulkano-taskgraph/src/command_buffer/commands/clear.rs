@@ -1,10 +1,10 @@
 use crate::{
     command_buffer::{RecordingCommandBuffer, Result},
-    resource::{AccessType, ImageLayoutType},
+    resource::{AccessTypes, ImageLayoutType},
     Id,
 };
 use smallvec::SmallVec;
-use std::{ffi::c_void, mem};
+use std::ffi::c_void;
 use vulkano::{
     buffer::{Buffer, BufferContents},
     device::DeviceOwned,
@@ -36,7 +36,7 @@ impl RecordingCommandBuffer<'_> {
         } = clear_info;
 
         let image = unsafe { self.accesses.image_unchecked(image) };
-        let image_layout = AccessType::ClearTransferWrite.image_layout(image_layout);
+        let image_layout = AccessTypes::CLEAR_TRANSFER_WRITE.image_layout(image_layout);
 
         let fns = self.device().fns();
         let cmd_clear_color_image = fns.v1_0.cmd_clear_color_image;
@@ -96,7 +96,7 @@ impl RecordingCommandBuffer<'_> {
         } = clear_info;
 
         let image = unsafe { self.accesses.image_unchecked(image) };
-        let image_layout = AccessType::ClearTransferWrite.image_layout(image_layout);
+        let image_layout = AccessTypes::CLEAR_TRANSFER_WRITE.image_layout(image_layout);
 
         let fns = self.device().fns();
         let cmd_clear_depth_stencil_image = fns.v1_0.cmd_clear_depth_stencil_image;
@@ -186,7 +186,7 @@ impl RecordingCommandBuffer<'_> {
                 dst_buffer,
                 dst_offset,
                 <*const _>::cast(data),
-                mem::size_of_val(data) as DeviceSize,
+                size_of_val(data) as DeviceSize,
             )
         }
     }
@@ -249,7 +249,15 @@ pub struct ClearColorImageInfo<'a> {
 impl Default for ClearColorImageInfo<'_> {
     #[inline]
     fn default() -> Self {
-        ClearColorImageInfo {
+        Self::new()
+    }
+}
+
+impl ClearColorImageInfo<'_> {
+    /// Returns a default `ClearColorImageInfo`.
+    #[inline]
+    pub const fn new() -> Self {
+        Self {
             image: Id::INVALID,
             image_layout: ImageLayoutType::Optimal,
             clear_value: ClearColorValue::Float([0.0; 4]),
@@ -288,10 +296,21 @@ pub struct ClearDepthStencilImageInfo<'a> {
 impl Default for ClearDepthStencilImageInfo<'_> {
     #[inline]
     fn default() -> Self {
-        ClearDepthStencilImageInfo {
+        Self::new()
+    }
+}
+
+impl ClearDepthStencilImageInfo<'_> {
+    /// Returns a default `ClearDepthStencilImageInfo`.
+    #[inline]
+    pub const fn new() -> Self {
+        Self {
             image: Id::INVALID,
             image_layout: ImageLayoutType::Optimal,
-            clear_value: ClearDepthStencilValue::default(),
+            clear_value: ClearDepthStencilValue {
+                depth: 0.0,
+                stencil: 0,
+            },
             regions: &[],
             _ne: crate::NE,
         }
@@ -331,7 +350,15 @@ pub struct FillBufferInfo<'a> {
 impl Default for FillBufferInfo<'_> {
     #[inline]
     fn default() -> Self {
-        FillBufferInfo {
+        Self::new()
+    }
+}
+
+impl FillBufferInfo<'_> {
+    /// Returns a default `FillBufferInfo`.
+    #[inline]
+    pub const fn new() -> Self {
+        Self {
             dst_buffer: Id::INVALID,
             dst_offset: 0,
             size: 0,

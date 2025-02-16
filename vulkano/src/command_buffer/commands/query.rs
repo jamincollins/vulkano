@@ -10,6 +10,7 @@ use crate::{
     sync::{PipelineStage, PipelineStageAccessFlags, PipelineStages},
     DeviceSize, Requires, RequiresAllOf, RequiresOneOf, ValidationError, Version, VulkanObject,
 };
+use ash::vk;
 use std::{ops::Range, sync::Arc};
 
 /// # Commands related to queries.
@@ -30,7 +31,7 @@ impl<L> AutoCommandBufferBuilder<L> {
     ) -> Result<&mut Self, Box<ValidationError>> {
         self.validate_begin_query(&query_pool, query, flags)?;
 
-        Ok(self.begin_query_unchecked(query_pool, query, flags))
+        Ok(unsafe { self.begin_query_unchecked(query_pool, query, flags) })
     }
 
     fn validate_begin_query(
@@ -98,7 +99,7 @@ impl<L> AutoCommandBufferBuilder<L> {
             "begin_query",
             Default::default(),
             move |out: &mut RecordingCommandBuffer| {
-                out.begin_query_unchecked(&query_pool, query, flags);
+                unsafe { out.begin_query_unchecked(&query_pool, query, flags) };
             },
         );
 
@@ -167,7 +168,7 @@ impl<L> AutoCommandBufferBuilder<L> {
             "end_query",
             Default::default(),
             move |out: &mut RecordingCommandBuffer| {
-                out.end_query_unchecked(&query_pool, query);
+                unsafe { out.end_query_unchecked(&query_pool, query) };
             },
         );
 
@@ -188,7 +189,7 @@ impl<L> AutoCommandBufferBuilder<L> {
     ) -> Result<&mut Self, Box<ValidationError>> {
         self.validate_write_timestamp(&query_pool, query, stage)?;
 
-        Ok(self.write_timestamp_unchecked(query_pool, query, stage))
+        Ok(unsafe { self.write_timestamp_unchecked(query_pool, query, stage) })
     }
 
     fn validate_write_timestamp(
@@ -234,7 +235,7 @@ impl<L> AutoCommandBufferBuilder<L> {
             "write_timestamp",
             Default::default(),
             move |out: &mut RecordingCommandBuffer| {
-                out.write_timestamp_unchecked(&query_pool, query, stage);
+                unsafe { out.write_timestamp_unchecked(&query_pool, query, stage) };
             },
         );
 
@@ -316,12 +317,14 @@ impl<L> AutoCommandBufferBuilder<L> {
             .into_iter()
             .collect(),
             move |out: &mut RecordingCommandBuffer| {
-                out.copy_query_pool_results_unchecked(
-                    &query_pool,
-                    queries.clone(),
-                    &destination,
-                    flags,
-                );
+                unsafe {
+                    out.copy_query_pool_results_unchecked(
+                        &query_pool,
+                        queries.clone(),
+                        &destination,
+                        flags,
+                    )
+                };
             },
         );
 
@@ -343,7 +346,7 @@ impl<L> AutoCommandBufferBuilder<L> {
     ) -> Result<&mut Self, Box<ValidationError>> {
         self.validate_reset_query_pool(&query_pool, queries.clone())?;
 
-        Ok(self.reset_query_pool_unchecked(query_pool, queries))
+        Ok(unsafe { self.reset_query_pool_unchecked(query_pool, queries) })
     }
 
     fn validate_reset_query_pool(
@@ -388,7 +391,7 @@ impl<L> AutoCommandBufferBuilder<L> {
             "reset_query_pool",
             Default::default(),
             move |out: &mut RecordingCommandBuffer| {
-                out.reset_query_pool_unchecked(&query_pool, queries.clone());
+                unsafe { out.reset_query_pool_unchecked(&query_pool, queries.clone()) };
             },
         );
 
@@ -406,7 +409,7 @@ impl RecordingCommandBuffer {
     ) -> Result<&mut Self, Box<ValidationError>> {
         self.validate_begin_query(query_pool, query, flags)?;
 
-        Ok(self.begin_query_unchecked(query_pool, query, flags))
+        Ok(unsafe { self.begin_query_unchecked(query_pool, query, flags) })
     }
 
     fn validate_begin_query(
@@ -567,7 +570,9 @@ impl RecordingCommandBuffer {
         flags: QueryControlFlags,
     ) -> &mut Self {
         let fns = self.device().fns();
-        (fns.v1_0.cmd_begin_query)(self.handle(), query_pool.handle(), query, flags.into());
+        unsafe {
+            (fns.v1_0.cmd_begin_query)(self.handle(), query_pool.handle(), query, flags.into())
+        };
 
         self
     }
@@ -580,7 +585,7 @@ impl RecordingCommandBuffer {
     ) -> Result<&mut Self, Box<ValidationError>> {
         self.validate_end_query(query_pool, query)?;
 
-        Ok(self.end_query_unchecked(query_pool, query))
+        Ok(unsafe { self.end_query_unchecked(query_pool, query) })
     }
 
     fn validate_end_query(
@@ -624,7 +629,7 @@ impl RecordingCommandBuffer {
     #[cfg_attr(not(feature = "document_unchecked"), doc(hidden))]
     pub unsafe fn end_query_unchecked(&mut self, query_pool: &QueryPool, query: u32) -> &mut Self {
         let fns = self.device().fns();
-        (fns.v1_0.cmd_end_query)(self.handle(), query_pool.handle(), query);
+        unsafe { (fns.v1_0.cmd_end_query)(self.handle(), query_pool.handle(), query) };
 
         self
     }
@@ -638,7 +643,7 @@ impl RecordingCommandBuffer {
     ) -> Result<&mut Self, Box<ValidationError>> {
         self.validate_write_timestamp(query_pool, query, stage)?;
 
-        Ok(self.write_timestamp_unchecked(query_pool, query, stage))
+        Ok(unsafe { self.write_timestamp_unchecked(query_pool, query, stage) })
     }
 
     fn validate_write_timestamp(
@@ -870,22 +875,33 @@ impl RecordingCommandBuffer {
 
         if self.device().enabled_features().synchronization2 {
             if self.device().api_version() >= Version::V1_3 {
-                (fns.v1_3.cmd_write_timestamp2)(
-                    self.handle(),
-                    stage.into(),
-                    query_pool.handle(),
-                    query,
-                );
+                unsafe {
+                    (fns.v1_3.cmd_write_timestamp2)(
+                        self.handle(),
+                        stage.into(),
+                        query_pool.handle(),
+                        query,
+                    )
+                };
             } else {
-                (fns.khr_synchronization2.cmd_write_timestamp2_khr)(
-                    self.handle(),
-                    stage.into(),
-                    query_pool.handle(),
-                    query,
-                );
+                unsafe {
+                    (fns.khr_synchronization2.cmd_write_timestamp2_khr)(
+                        self.handle(),
+                        stage.into(),
+                        query_pool.handle(),
+                        query,
+                    )
+                };
             }
         } else {
-            (fns.v1_0.cmd_write_timestamp)(self.handle(), stage.into(), query_pool.handle(), query);
+            unsafe {
+                (fns.v1_0.cmd_write_timestamp)(
+                    self.handle(),
+                    stage.into(),
+                    query_pool.handle(),
+                    query,
+                )
+            };
         }
 
         self
@@ -904,7 +920,9 @@ impl RecordingCommandBuffer {
     {
         self.validate_copy_query_pool_results(query_pool, queries.clone(), destination, flags)?;
 
-        Ok(self.copy_query_pool_results_unchecked(query_pool, queries, destination, flags))
+        Ok(unsafe {
+            self.copy_query_pool_results_unchecked(query_pool, queries, destination, flags)
+        })
     }
 
     fn validate_copy_query_pool_results<T>(
@@ -939,7 +957,7 @@ impl RecordingCommandBuffer {
 
         // VUID-vkCmdCopyQueryPoolResults-flags-00822
         // VUID-vkCmdCopyQueryPoolResults-flags-00823
-        debug_assert!(destination.offset() % std::mem::size_of::<T>() as DeviceSize == 0);
+        debug_assert!(destination.offset() % size_of::<T>() as DeviceSize == 0);
 
         if queries.end < queries.start {
             return Err(Box::new(ValidationError {
@@ -1013,19 +1031,21 @@ impl RecordingCommandBuffer {
         T: QueryResultElement,
     {
         let per_query_len = query_pool.result_len(flags);
-        let stride = per_query_len * std::mem::size_of::<T>() as DeviceSize;
+        let stride = per_query_len * size_of::<T>() as DeviceSize;
 
         let fns = self.device().fns();
-        (fns.v1_0.cmd_copy_query_pool_results)(
-            self.handle(),
-            query_pool.handle(),
-            queries.start,
-            queries.end - queries.start,
-            destination.buffer().handle(),
-            destination.offset(),
-            stride,
-            ash::vk::QueryResultFlags::from(flags) | T::FLAG,
-        );
+        unsafe {
+            (fns.v1_0.cmd_copy_query_pool_results)(
+                self.handle(),
+                query_pool.handle(),
+                queries.start,
+                queries.end - queries.start,
+                destination.buffer().handle(),
+                destination.offset(),
+                stride,
+                vk::QueryResultFlags::from(flags) | T::FLAG,
+            )
+        };
 
         self
     }
@@ -1038,7 +1058,7 @@ impl RecordingCommandBuffer {
     ) -> Result<&mut Self, Box<ValidationError>> {
         self.validate_reset_query_pool(query_pool, queries.clone())?;
 
-        Ok(self.reset_query_pool_unchecked(query_pool, queries))
+        Ok(unsafe { self.reset_query_pool_unchecked(query_pool, queries) })
     }
 
     fn validate_reset_query_pool(
@@ -1098,12 +1118,14 @@ impl RecordingCommandBuffer {
         queries: Range<u32>,
     ) -> &mut Self {
         let fns = self.device().fns();
-        (fns.v1_0.cmd_reset_query_pool)(
-            self.handle(),
-            query_pool.handle(),
-            queries.start,
-            queries.end - queries.start,
-        );
+        unsafe {
+            (fns.v1_0.cmd_reset_query_pool)(
+                self.handle(),
+                query_pool.handle(),
+                queries.start,
+                queries.end - queries.start,
+            )
+        };
 
         self
     }

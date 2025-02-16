@@ -113,11 +113,12 @@ use crate::{
     },
     Requires, RequiresAllOf, RequiresOneOf, Validated, ValidationError, VulkanError, VulkanObject,
 };
+use ash::vk;
 use foldhash::{HashMap, HashSet};
 use fragment_shading_rate::FragmentShadingRateState;
 use smallvec::SmallVec;
 use std::{
-    collections::hash_map::Entry, fmt::Debug, mem::MaybeUninit, num::NonZeroU64, ptr, sync::Arc,
+    collections::hash_map::Entry, fmt::Debug, mem::MaybeUninit, num::NonZero, ptr, sync::Arc,
 };
 
 pub mod color_blend;
@@ -140,9 +141,9 @@ pub mod viewport;
 /// implementation should perform the various operations needed by a draw command.
 #[derive(Debug)]
 pub struct GraphicsPipeline {
-    handle: ash::vk::Pipeline,
+    handle: vk::Pipeline,
     device: InstanceOwnedDebugWrapper<Arc<Device>>,
-    id: NonZeroU64,
+    id: NonZero<u64>,
 
     flags: PipelineCreateFlags,
     shader_stages: ShaderStages,
@@ -214,33 +215,35 @@ impl GraphicsPipeline {
 
             let cache_handle = match cache.as_ref() {
                 Some(cache) => cache.handle(),
-                None => ash::vk::PipelineCache::null(),
+                None => vk::PipelineCache::null(),
             };
 
             let fns = device.fns();
             let mut output = MaybeUninit::uninit();
-            (fns.v1_0.create_graphics_pipelines)(
-                device.handle(),
-                cache_handle,
-                1,
-                &create_info_vk,
-                ptr::null(),
-                output.as_mut_ptr(),
-            )
+            unsafe {
+                (fns.v1_0.create_graphics_pipelines)(
+                    device.handle(),
+                    cache_handle,
+                    1,
+                    &create_info_vk,
+                    ptr::null(),
+                    output.as_mut_ptr(),
+                )
+            }
             .result()
             .map_err(VulkanError::from)?;
 
-            output.assume_init()
+            unsafe { output.assume_init() }
         };
 
         // Some drivers return `VK_SUCCESS` but provide a null handle if they
         // fail to create the pipeline (due to invalid shaders, etc)
         // This check ensures that we don't create an invalid `GraphicsPipeline` instance
-        if handle == ash::vk::Pipeline::null() {
+        if handle == vk::Pipeline::null() {
             panic!("vkCreateGraphicsPipelines provided a NULL handle");
         }
 
-        Ok(Self::from_handle(device, handle, create_info))
+        Ok(unsafe { Self::from_handle(device, handle, create_info) })
     }
 
     /// Creates a new `GraphicsPipeline` from a raw object handle.
@@ -252,7 +255,7 @@ impl GraphicsPipeline {
     #[inline]
     pub unsafe fn from_handle(
         device: Arc<Device>,
-        handle: ash::vk::Pipeline,
+        handle: vk::Pipeline,
         create_info: GraphicsPipelineCreateInfo,
     ) -> Arc<Self> {
         let GraphicsPipelineCreateInfo {
@@ -600,7 +603,7 @@ unsafe impl DeviceOwned for GraphicsPipeline {
 }
 
 unsafe impl VulkanObject for GraphicsPipeline {
-    type Handle = ash::vk::Pipeline;
+    type Handle = vk::Pipeline;
 
     #[inline]
     fn handle(&self) -> Self::Handle {
@@ -746,9 +749,10 @@ pub struct GraphicsPipelineCreateInfo {
 }
 
 impl GraphicsPipelineCreateInfo {
-    /// Returns a `GraphicsPipelineCreateInfo` with the specified `layout`.
+    /// Returns a default `GraphicsPipelineCreateInfo` with the provided `layout`.
+    // TODO: make const
     #[inline]
-    pub fn layout(layout: Arc<PipelineLayout>) -> Self {
+    pub fn new(layout: Arc<PipelineLayout>) -> Self {
         Self {
             flags: PipelineCreateFlags::empty(),
             stages: SmallVec::new(),
@@ -772,6 +776,12 @@ impl GraphicsPipelineCreateInfo {
 
             _ne: crate::NonExhaustive(()),
         }
+    }
+
+    #[deprecated(since = "0.36.0", note = "use `new` instead")]
+    #[inline]
+    pub fn layout(layout: Arc<PipelineLayout>) -> Self {
+        Self::new(layout)
     }
 
     pub(crate) fn validate(&self, device: &Device) -> Result<(), Box<ValidationError>> {
@@ -1616,8 +1626,8 @@ impl GraphicsPipelineCreateInfo {
 
         if let Some(viewport_state) = viewport_state {
             let ViewportState {
-                ref viewports,
-                ref scissors,
+                viewports,
+                scissors,
                 _ne: _,
             } = viewport_state;
 
@@ -2338,7 +2348,7 @@ impl GraphicsPipelineCreateInfo {
         &self,
         fields1_vk: &'a GraphicsPipelineCreateInfoFields1Vk<'_>,
         extensions_vk: &'a mut GraphicsPipelineCreateInfoExtensionsVk<'_>,
-    ) -> ash::vk::GraphicsPipelineCreateInfo<'a> {
+    ) -> vk::GraphicsPipelineCreateInfo<'a> {
         let &Self {
             flags,
             stages: _,
@@ -2366,7 +2376,7 @@ impl GraphicsPipelineCreateInfo {
             Some(PipelineSubpassType::BeginRenderPass(subpass)) => {
                 (subpass.render_pass().handle(), subpass.index())
             }
-            _ => (ash::vk::RenderPass::null(), 0),
+            _ => (vk::RenderPass::null(), 0),
         };
         let GraphicsPipelineCreateInfoFields1Vk {
             stages_vk,
@@ -2381,7 +2391,7 @@ impl GraphicsPipelineCreateInfo {
             dynamic_state_vk,
         } = fields1_vk;
 
-        let mut val_vk = ash::vk::GraphicsPipelineCreateInfo::default()
+        let mut val_vk = vk::GraphicsPipelineCreateInfo::default()
             .flags(flags.into())
             .stages(stages_vk)
             .layout(layout.handle())
@@ -2390,7 +2400,7 @@ impl GraphicsPipelineCreateInfo {
             .base_pipeline_handle(
                 base_pipeline
                     .as_ref()
-                    .map_or(ash::vk::Pipeline::null(), VulkanObject::handle),
+                    .map_or(vk::Pipeline::null(), VulkanObject::handle),
             )
             .base_pipeline_index(-1);
 
@@ -2553,8 +2563,8 @@ impl GraphicsPipelineCreateInfo {
                 color_blend_state.to_vk(fields1_vk, extensions_vk)
             });
         let dynamic_state_vk = (!dynamic_states_vk.is_empty()).then(|| {
-            ash::vk::PipelineDynamicStateCreateInfo::default()
-                .flags(ash::vk::PipelineDynamicStateCreateFlags::empty())
+            vk::PipelineDynamicStateCreateInfo::default()
+                .flags(vk::PipelineDynamicStateCreateFlags::empty())
                 .dynamic_states(dynamic_states_vk)
         });
 
@@ -2689,25 +2699,23 @@ impl GraphicsPipelineCreateInfo {
 
 pub(crate) struct GraphicsPipelineCreateInfoExtensionsVk<'a> {
     pub(crate) discard_rectangle_state_vk:
-        Option<ash::vk::PipelineDiscardRectangleStateCreateInfoEXT<'a>>,
-    pub(crate) rendering_vk: Option<ash::vk::PipelineRenderingCreateInfo<'a>>,
+        Option<vk::PipelineDiscardRectangleStateCreateInfoEXT<'a>>,
+    pub(crate) rendering_vk: Option<vk::PipelineRenderingCreateInfo<'a>>,
     pub(crate) fragment_shading_rate_vk:
-        Option<ash::vk::PipelineFragmentShadingRateStateCreateInfoKHR<'a>>,
+        Option<vk::PipelineFragmentShadingRateStateCreateInfoKHR<'a>>,
 }
 
 pub(crate) struct GraphicsPipelineCreateInfoFields1Vk<'a> {
-    pub(crate) stages_vk: SmallVec<[ash::vk::PipelineShaderStageCreateInfo<'a>; 5]>,
-    pub(crate) vertex_input_state_vk: Option<ash::vk::PipelineVertexInputStateCreateInfo<'a>>,
-    pub(crate) input_assembly_state_vk:
-        Option<ash::vk::PipelineInputAssemblyStateCreateInfo<'static>>,
-    pub(crate) tessellation_state_vk: Option<ash::vk::PipelineTessellationStateCreateInfo<'a>>,
-    pub(crate) viewport_state_vk: Option<ash::vk::PipelineViewportStateCreateInfo<'a>>,
-    pub(crate) rasterization_state_vk: Option<ash::vk::PipelineRasterizationStateCreateInfo<'a>>,
-    pub(crate) multisample_state_vk: Option<ash::vk::PipelineMultisampleStateCreateInfo<'a>>,
-    pub(crate) depth_stencil_state_vk:
-        Option<ash::vk::PipelineDepthStencilStateCreateInfo<'static>>,
-    pub(crate) color_blend_state_vk: Option<ash::vk::PipelineColorBlendStateCreateInfo<'a>>,
-    pub(crate) dynamic_state_vk: Option<ash::vk::PipelineDynamicStateCreateInfo<'a>>,
+    pub(crate) stages_vk: SmallVec<[vk::PipelineShaderStageCreateInfo<'a>; 5]>,
+    pub(crate) vertex_input_state_vk: Option<vk::PipelineVertexInputStateCreateInfo<'a>>,
+    pub(crate) input_assembly_state_vk: Option<vk::PipelineInputAssemblyStateCreateInfo<'static>>,
+    pub(crate) tessellation_state_vk: Option<vk::PipelineTessellationStateCreateInfo<'a>>,
+    pub(crate) viewport_state_vk: Option<vk::PipelineViewportStateCreateInfo<'a>>,
+    pub(crate) rasterization_state_vk: Option<vk::PipelineRasterizationStateCreateInfo<'a>>,
+    pub(crate) multisample_state_vk: Option<vk::PipelineMultisampleStateCreateInfo<'a>>,
+    pub(crate) depth_stencil_state_vk: Option<vk::PipelineDepthStencilStateCreateInfo<'static>>,
+    pub(crate) color_blend_state_vk: Option<vk::PipelineColorBlendStateCreateInfo<'a>>,
+    pub(crate) dynamic_state_vk: Option<vk::PipelineDynamicStateCreateInfo<'a>>,
 }
 
 pub(crate) struct GraphicsPipelineCreateInfoFields1ExtensionsVk<'a> {
@@ -2723,7 +2731,7 @@ pub(crate) struct GraphicsPipelineCreateInfoFields2Vk<'a> {
     pub(crate) vertex_input_state_fields1_vk: Option<VertexInputStateFields1Vk>,
     pub(crate) viewport_state_fields1_vk: Option<ViewportStateFields1Vk>,
     pub(crate) color_blend_state_fields1_vk: Option<ColorBlendStateFields1Vk>,
-    pub(crate) dynamic_states_vk: SmallVec<[ash::vk::DynamicState; 4]>,
+    pub(crate) dynamic_states_vk: SmallVec<[vk::DynamicState; 4]>,
     pub(crate) discard_rectangle_state_fields1_vk: Option<DiscardRectangleStateFields1Vk>,
     pub(crate) rendering_fields1_vk: Option<PipelineRenderingCreateInfoFields1Vk>,
 }

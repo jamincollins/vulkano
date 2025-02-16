@@ -1,6 +1,6 @@
 use crate::App;
 use glam::{Mat4, Vec3};
-use std::{iter, mem::size_of, sync::Arc};
+use std::{iter, sync::Arc};
 use vulkano::{
     acceleration_structure::{
         AccelerationStructure, AccelerationStructureBuildGeometryInfo,
@@ -33,39 +33,8 @@ use vulkano::{
     sync::GpuFuture,
 };
 
-mod raygen {
-    vulkano_shaders::shader! {
-        ty: "raygen",
-        path: "raytrace.rgen",
-        vulkan_version: "1.2"
-    }
-}
-
-mod closest_hit {
-    vulkano_shaders::shader! {
-        ty: "closesthit",
-        path: "raytrace.rchit",
-        vulkan_version: "1.2"
-    }
-}
-
-mod miss {
-    vulkano_shaders::shader! {
-        ty: "miss",
-        path: "raytrace.miss",
-        vulkan_version: "1.2"
-    }
-}
-
-#[derive(BufferContents, Vertex)]
-#[repr(C)]
-struct MyVertex {
-    #[format(R32G32B32_SFLOAT)]
-    position: [f32; 3],
-}
-
 pub struct Scene {
-    descriptor_set_0: Arc<DescriptorSet>,
+    descriptor_set: Arc<DescriptorSet>,
     swapchain_image_sets: Vec<(Arc<ImageView>, Arc<DescriptorSet>)>,
     pipeline_layout: Arc<PipelineLayout>,
     descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
@@ -95,7 +64,6 @@ impl Scene {
                 .unwrap()
                 .entry_point("main")
                 .unwrap();
-
             let miss = miss::load(app.device.clone())
                 .unwrap()
                 .entry_point("main")
@@ -126,8 +94,7 @@ impl Scene {
                     stages: stages.into_iter().collect(),
                     groups: groups.into_iter().collect(),
                     max_pipeline_ray_recursion_depth: 1,
-
-                    ..RayTracingPipelineCreateInfo::layout(pipeline_layout.clone())
+                    ..RayTracingPipelineCreateInfo::new(pipeline_layout.clone())
                 },
             )
             .unwrap()
@@ -162,11 +129,10 @@ impl Scene {
         .unwrap();
 
         // Build the bottom-level acceleration structure and then the top-level acceleration
-        // structure. Acceleration structures are used to accelerate ray tracing.
-        // The bottom-level acceleration structure contains the geometry data.
-        // The top-level acceleration structure contains the instances of the bottom-level
-        // acceleration structures. In our shader, we will trace rays against the top-level
-        // acceleration structure.
+        // structure. Acceleration structures are used to accelerate ray tracing. The bottom-level
+        // acceleration structure contains the geometry data. The top-level acceleration structure
+        // contains the instances of the bottom-level acceleration structures. In our shader, we
+        // will trace rays against the top-level acceleration structure.
         let blas = unsafe {
             build_acceleration_structure_triangles(
                 vertex_buffer,
@@ -176,10 +142,12 @@ impl Scene {
                 app.queue.clone(),
             )
         };
-
         let tlas = unsafe {
             build_top_level_acceleration_structure(
-                blas.clone(),
+                vec![AccelerationStructureInstance {
+                    acceleration_structure_reference: blas.device_address().into(),
+                    ..Default::default()
+                }],
                 memory_allocator.clone(),
                 command_buffer_allocator.clone(),
                 app.device.clone(),
@@ -187,7 +155,7 @@ impl Scene {
             )
         };
 
-        let proj = Mat4::perspective_rh_gl(std::f32::consts::FRAC_PI_2, 4.0 / 3.0, 0.01, 100.0);
+        let proj = Mat4::perspective_rh(std::f32::consts::FRAC_PI_2, 4.0 / 3.0, 0.01, 100.0);
         let view = Mat4::look_at_rh(
             Vec3::new(0.0, 0.0, 1.0),
             Vec3::new(0.0, 0.0, 0.0),
@@ -206,14 +174,14 @@ impl Scene {
                 ..Default::default()
             },
             raygen::Camera {
-                viewInverse: view.inverse().to_cols_array_2d(),
-                projInverse: proj.inverse().to_cols_array_2d(),
-                viewProj: (proj * view).to_cols_array_2d(),
+                view_proj: (proj * view).to_cols_array_2d(),
+                view_inverse: view.inverse().to_cols_array_2d(),
+                proj_inverse: proj.inverse().to_cols_array_2d(),
             },
         )
         .unwrap();
 
-        let descriptor_set_0 = DescriptorSet::new(
+        let descriptor_set = DescriptorSet::new(
             descriptor_set_allocator.clone(),
             pipeline_layout.set_layouts()[0].clone(),
             [
@@ -231,7 +199,7 @@ impl Scene {
             ShaderBindingTable::new(memory_allocator.clone(), &pipeline).unwrap();
 
         Scene {
-            descriptor_set_0,
+            descriptor_set,
             swapchain_image_sets,
             descriptor_set_allocator,
             pipeline_layout,
@@ -261,29 +229,50 @@ impl Scene {
                 self.pipeline_layout.clone(),
                 0,
                 vec![
-                    self.descriptor_set_0.clone(),
+                    self.descriptor_set.clone(),
                     self.swapchain_image_sets[image_index as usize].1.clone(),
                 ],
             )
-            .unwrap();
-
-        builder
+            .unwrap()
             .bind_pipeline_ray_tracing(self.pipeline.clone())
             .unwrap();
 
         let extent = self.swapchain_image_sets[0].0.image().extent();
 
-        unsafe {
-            builder
-                .trace_rays(
-                    self.shader_binding_table.addresses().clone(),
-                    extent[0],
-                    extent[1],
-                    1,
-                )
-                .unwrap();
-        }
+        unsafe { builder.trace_rays(self.shader_binding_table.addresses().clone(), extent) }
+            .unwrap();
     }
+}
+
+mod raygen {
+    vulkano_shaders::shader! {
+        ty: "raygen",
+        path: "rgen.glsl",
+        vulkan_version: "1.2",
+    }
+}
+
+mod closest_hit {
+    vulkano_shaders::shader! {
+        ty: "closesthit",
+        path: "rchit.glsl",
+        vulkan_version: "1.2",
+    }
+}
+
+mod miss {
+    vulkano_shaders::shader! {
+        ty: "miss",
+        path: "rmiss.glsl",
+        vulkan_version: "1.2",
+    }
+}
+
+#[derive(BufferContents, Vertex)]
+#[repr(C)]
+struct MyVertex {
+    #[format(R32G32B32_SFLOAT)]
+    position: [f32; 3],
 }
 
 /// This function is called once during initialization, then again whenever the window is resized.
@@ -303,6 +292,7 @@ fn window_size_dependent_setup(
                 [],
             )
             .unwrap();
+
             (image_view, descriptor_set)
         })
         .collect();
@@ -311,7 +301,9 @@ fn window_size_dependent_setup(
 }
 
 /// A helper function to build a acceleration structure and wait for its completion.
-/// # SAFETY
+///
+/// # Safety
+///
 /// - If you are referencing a bottom-level acceleration structure in a top-level acceleration
 ///   structure, you must ensure that the bottom-level acceleration structure is kept alive.
 unsafe fn build_acceleration_structure_common(
@@ -337,8 +329,8 @@ unsafe fn build_acceleration_structure_common(
         )
         .unwrap();
 
-    // We build a new scratch buffer for each acceleration structure for simplicity.
-    // You may want to reuse scratch buffers if you need to build many acceleration structures.
+    // We create a new scratch buffer for each acceleration structure for simplicity. You may want
+    // to reuse scratch buffers if you need to build many acceleration structures.
     let scratch_buffer = Buffer::new_slice::<u8>(
         memory_allocator.clone(),
         BufferCreateInfo {
@@ -367,7 +359,7 @@ unsafe fn build_acceleration_structure_common(
         )
     };
 
-    let acceleration = unsafe { AccelerationStructure::new(device, as_create_info).unwrap() };
+    let acceleration = unsafe { AccelerationStructure::new(device, as_create_info) }.unwrap();
 
     as_build_geometry_info.dst_acceleration_structure = Some(acceleration.clone());
     as_build_geometry_info.scratch_data = Some(scratch_buffer);
@@ -377,9 +369,8 @@ unsafe fn build_acceleration_structure_common(
         ..Default::default()
     };
 
-    // For simplicity, we build a single command buffer
-    // that builds the acceleration structure, then waits
-    // for its execution to complete.
+    // For simplicity, we build a single command buffer that builds the acceleration structure,
+    // then waits for its execution to complete.
     let mut builder = AutoCommandBufferBuilder::primary(
         command_buffer_allocator,
         queue.queue_family_index(),
@@ -436,16 +427,13 @@ unsafe fn build_acceleration_structure_triangles(
 }
 
 unsafe fn build_top_level_acceleration_structure(
-    acceleration_structure: Arc<AccelerationStructure>,
+    as_instances: Vec<AccelerationStructureInstance>,
     allocator: Arc<dyn MemoryAllocator>,
     command_buffer_allocator: Arc<dyn CommandBufferAllocator>,
     device: Arc<Device>,
     queue: Arc<Queue>,
 ) -> Arc<AccelerationStructure> {
-    let as_instance = AccelerationStructureInstance {
-        acceleration_structure_reference: acceleration_structure.device_address().into(),
-        ..Default::default()
-    };
+    let primitive_count = as_instances.len() as u32;
 
     let instance_buffer = Buffer::from_iter(
         allocator.clone(),
@@ -459,7 +447,7 @@ unsafe fn build_top_level_acceleration_structure(
                 | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
             ..Default::default()
         },
-        [as_instance],
+        as_instances,
     )
     .unwrap();
 
@@ -471,7 +459,7 @@ unsafe fn build_top_level_acceleration_structure(
 
     build_acceleration_structure_common(
         geometries,
-        1,
+        primitive_count,
         AccelerationStructureType::TopLevel,
         allocator,
         command_buffer_allocator,

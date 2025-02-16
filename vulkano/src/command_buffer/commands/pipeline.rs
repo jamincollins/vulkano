@@ -30,7 +30,7 @@ use crate::{
     sync::{PipelineStageAccess, PipelineStageAccessFlags},
     DeviceSize, Requires, RequiresAllOf, RequiresOneOf, ValidationError, Version, VulkanObject,
 };
-use std::{mem::size_of, sync::Arc};
+use std::sync::Arc;
 
 macro_rules! vuids {
     ($vuid_type:ident, $($id:literal),+ $(,)?) => {
@@ -119,7 +119,7 @@ impl<L> AutoCommandBufferBuilder<L> {
             "dispatch",
             used_resources,
             move |out: &mut RecordingCommandBuffer| {
-                out.dispatch_unchecked(group_counts);
+                unsafe { out.dispatch_unchecked(group_counts) };
             },
         );
 
@@ -201,7 +201,7 @@ impl<L> AutoCommandBufferBuilder<L> {
             "dispatch",
             used_resources,
             move |out: &mut RecordingCommandBuffer| {
-                out.dispatch_indirect_unchecked(&indirect_buffer);
+                unsafe { out.dispatch_indirect_unchecked(&indirect_buffer) };
             },
         );
 
@@ -388,7 +388,9 @@ impl<L> AutoCommandBufferBuilder<L> {
             "draw",
             used_resources,
             move |out: &mut RecordingCommandBuffer| {
-                out.draw_unchecked(vertex_count, instance_count, first_vertex, first_instance);
+                unsafe {
+                    out.draw_unchecked(vertex_count, instance_count, first_vertex, first_instance)
+                };
             },
         );
 
@@ -495,7 +497,7 @@ impl<L> AutoCommandBufferBuilder<L> {
             "draw_indirect",
             used_resources,
             move |out: &mut RecordingCommandBuffer| {
-                out.draw_indirect_unchecked(&indirect_buffer, draw_count, stride);
+                unsafe { out.draw_indirect_unchecked(&indirect_buffer, draw_count, stride) };
             },
         );
 
@@ -625,12 +627,14 @@ impl<L> AutoCommandBufferBuilder<L> {
             "draw_indirect_count",
             used_resources,
             move |out: &mut RecordingCommandBuffer| {
-                out.draw_indirect_count_unchecked(
-                    &indirect_buffer,
-                    &count_buffer,
-                    max_draw_count,
-                    stride,
-                );
+                unsafe {
+                    out.draw_indirect_count_unchecked(
+                        &indirect_buffer,
+                        &count_buffer,
+                        max_draw_count,
+                        stride,
+                    )
+                };
             },
         );
 
@@ -862,13 +866,15 @@ impl<L> AutoCommandBufferBuilder<L> {
             "draw_indexed",
             used_resources,
             move |out: &mut RecordingCommandBuffer| {
-                out.draw_indexed_unchecked(
-                    index_count,
-                    instance_count,
-                    first_index,
-                    vertex_offset,
-                    first_instance,
-                );
+                unsafe {
+                    out.draw_indexed_unchecked(
+                        index_count,
+                        instance_count,
+                        first_index,
+                        vertex_offset,
+                        first_instance,
+                    )
+                };
             },
         );
 
@@ -991,7 +997,9 @@ impl<L> AutoCommandBufferBuilder<L> {
             "draw_indexed_indirect",
             used_resources,
             move |out: &mut RecordingCommandBuffer| {
-                out.draw_indexed_indirect_unchecked(&indirect_buffer, draw_count, stride);
+                unsafe {
+                    out.draw_indexed_indirect_unchecked(&indirect_buffer, draw_count, stride)
+                };
             },
         );
 
@@ -1136,12 +1144,14 @@ impl<L> AutoCommandBufferBuilder<L> {
             "draw_indexed_indirect_count",
             used_resources,
             move |out: &mut RecordingCommandBuffer| {
-                out.draw_indexed_indirect_count_unchecked(
-                    &indirect_buffer,
-                    &count_buffer,
-                    max_draw_count,
-                    stride,
-                );
+                unsafe {
+                    out.draw_indexed_indirect_count_unchecked(
+                        &indirect_buffer,
+                        &count_buffer,
+                        max_draw_count,
+                        stride,
+                    )
+                };
             },
         );
 
@@ -1328,7 +1338,7 @@ impl<L> AutoCommandBufferBuilder<L> {
             "draw_mesh_tasks",
             used_resources,
             move |out: &mut RecordingCommandBuffer| {
-                out.draw_mesh_tasks_unchecked(group_counts);
+                unsafe { out.draw_mesh_tasks_unchecked(group_counts) };
             },
         );
 
@@ -1443,7 +1453,9 @@ impl<L> AutoCommandBufferBuilder<L> {
             "draw_mesh_tasks_indirect",
             used_resources,
             move |out: &mut RecordingCommandBuffer| {
-                out.draw_mesh_tasks_indirect_unchecked(&indirect_buffer, draw_count, stride);
+                unsafe {
+                    out.draw_mesh_tasks_indirect_unchecked(&indirect_buffer, draw_count, stride)
+                };
             },
         );
 
@@ -1581,38 +1593,48 @@ impl<L> AutoCommandBufferBuilder<L> {
             "draw_mesh_tasks_indirect_count",
             used_resources,
             move |out: &mut RecordingCommandBuffer| {
-                out.draw_mesh_tasks_indirect_count_unchecked(
-                    &indirect_buffer,
-                    &count_buffer,
-                    max_draw_count,
-                    stride,
-                );
+                unsafe {
+                    out.draw_mesh_tasks_indirect_count_unchecked(
+                        &indirect_buffer,
+                        &count_buffer,
+                        max_draw_count,
+                        stride,
+                    )
+                };
             },
         );
 
         self
     }
 
+    /// Performs a single ray tracing operation using a ray tracing pipeline.
+    ///
+    /// A ray tracing pipeline must have been bound using [`bind_pipeline_ray_tracing`]. Any
+    /// resources used by the ray tracing pipeline, such as descriptor sets, must have been set
+    /// beforehand.
+    ///
+    /// # Safety
+    ///
+    /// - The general [shader safety requirements] apply.
+    ///
+    /// [`bind_pipeline_ray_tracing`]: Self::bind_pipeline_ray_tracing
+    /// [shader safety requirements]: vulkano::shader#safety
     pub unsafe fn trace_rays(
         &mut self,
         shader_binding_table_addresses: ShaderBindingTableAddresses,
-        width: u32,
-        height: u32,
-        depth: u32,
+        dimensions: [u32; 3],
     ) -> Result<&mut Self, Box<ValidationError>> {
         self.inner
-            .validate_trace_rays(&shader_binding_table_addresses, width, height, depth)?;
+            .validate_trace_rays(&shader_binding_table_addresses, dimensions)?;
 
-        Ok(self.trace_rays_unchecked(shader_binding_table_addresses, width, height, depth))
+        Ok(unsafe { self.trace_rays_unchecked(shader_binding_table_addresses, dimensions) })
     }
 
     #[cfg_attr(not(feature = "document_unchecked"), doc(hidden))]
     pub unsafe fn trace_rays_unchecked(
         &mut self,
         shader_binding_table_addresses: ShaderBindingTableAddresses,
-        width: u32,
-        height: u32,
-        depth: u32,
+        dimensions: [u32; 3],
     ) -> &mut Self {
         let pipeline = self.builder_state.pipeline_ray_tracing.as_deref().unwrap();
 
@@ -1620,7 +1642,7 @@ impl<L> AutoCommandBufferBuilder<L> {
         self.add_descriptor_sets_resources(&mut used_resources, pipeline);
 
         self.add_command("trace_rays", used_resources, move |out| {
-            out.trace_rays_unchecked(&shader_binding_table_addresses, width, height, depth);
+            unsafe { out.trace_rays_unchecked(&shader_binding_table_addresses, dimensions) };
         });
 
         self
@@ -3758,7 +3780,7 @@ impl RecordingCommandBuffer {
     ) -> Result<&mut Self, Box<ValidationError>> {
         self.validate_dispatch(group_counts)?;
 
-        Ok(self.dispatch_unchecked(group_counts))
+        Ok(unsafe { self.dispatch_unchecked(group_counts) })
     }
 
     fn validate_dispatch(&self, group_counts: [u32; 3]) -> Result<(), Box<ValidationError>> {
@@ -3811,12 +3833,14 @@ impl RecordingCommandBuffer {
     #[cfg_attr(not(feature = "document_unchecked"), doc(hidden))]
     pub unsafe fn dispatch_unchecked(&mut self, group_counts: [u32; 3]) -> &mut Self {
         let fns = self.device().fns();
-        (fns.v1_0.cmd_dispatch)(
-            self.handle(),
-            group_counts[0],
-            group_counts[1],
-            group_counts[2],
-        );
+        unsafe {
+            (fns.v1_0.cmd_dispatch)(
+                self.handle(),
+                group_counts[0],
+                group_counts[1],
+                group_counts[2],
+            )
+        };
 
         self
     }
@@ -3828,7 +3852,7 @@ impl RecordingCommandBuffer {
     ) -> Result<&mut Self, Box<ValidationError>> {
         self.validate_dispatch_indirect(indirect_buffer.as_bytes())?;
 
-        Ok(self.dispatch_indirect_unchecked(indirect_buffer))
+        Ok(unsafe { self.dispatch_indirect_unchecked(indirect_buffer) })
     }
 
     fn validate_dispatch_indirect(
@@ -3887,11 +3911,13 @@ impl RecordingCommandBuffer {
         indirect_buffer: &Subbuffer<[DispatchIndirectCommand]>,
     ) -> &mut Self {
         let fns = self.device().fns();
-        (fns.v1_0.cmd_dispatch_indirect)(
-            self.handle(),
-            indirect_buffer.buffer().handle(),
-            indirect_buffer.offset(),
-        );
+        unsafe {
+            (fns.v1_0.cmd_dispatch_indirect)(
+                self.handle(),
+                indirect_buffer.buffer().handle(),
+                indirect_buffer.offset(),
+            )
+        };
 
         self
     }
@@ -3906,7 +3932,9 @@ impl RecordingCommandBuffer {
     ) -> Result<&mut Self, Box<ValidationError>> {
         self.validate_draw(vertex_count, instance_count, first_vertex, first_instance)?;
 
-        Ok(self.draw_unchecked(vertex_count, instance_count, first_vertex, first_instance))
+        Ok(unsafe {
+            self.draw_unchecked(vertex_count, instance_count, first_vertex, first_instance)
+        })
     }
 
     fn validate_draw(
@@ -3942,13 +3970,15 @@ impl RecordingCommandBuffer {
         first_instance: u32,
     ) -> &mut Self {
         let fns = self.device().fns();
-        (fns.v1_0.cmd_draw)(
-            self.handle(),
-            vertex_count,
-            instance_count,
-            first_vertex,
-            first_instance,
-        );
+        unsafe {
+            (fns.v1_0.cmd_draw)(
+                self.handle(),
+                vertex_count,
+                instance_count,
+                first_vertex,
+                first_instance,
+            )
+        };
 
         self
     }
@@ -3962,7 +3992,7 @@ impl RecordingCommandBuffer {
     ) -> Result<&mut Self, Box<ValidationError>> {
         self.validate_draw_indirect(indirect_buffer.as_bytes(), draw_count, stride)?;
 
-        Ok(self.draw_indirect_unchecked(indirect_buffer, draw_count, stride))
+        Ok(unsafe { self.draw_indirect_unchecked(indirect_buffer, draw_count, stride) })
     }
 
     fn validate_draw_indirect(
@@ -4077,13 +4107,15 @@ impl RecordingCommandBuffer {
         stride: u32,
     ) -> &mut Self {
         let fns = self.device().fns();
-        (fns.v1_0.cmd_draw_indirect)(
-            self.handle(),
-            indirect_buffer.buffer().handle(),
-            indirect_buffer.offset(),
-            draw_count,
-            stride,
-        );
+        unsafe {
+            (fns.v1_0.cmd_draw_indirect)(
+                self.handle(),
+                indirect_buffer.buffer().handle(),
+                indirect_buffer.offset(),
+                draw_count,
+                stride,
+            )
+        };
 
         self
     }
@@ -4103,12 +4135,14 @@ impl RecordingCommandBuffer {
             stride,
         )?;
 
-        Ok(self.draw_indirect_count_unchecked(
-            indirect_buffer,
-            count_buffer,
-            max_draw_count,
-            stride,
-        ))
+        Ok(unsafe {
+            self.draw_indirect_count_unchecked(
+                indirect_buffer,
+                count_buffer,
+                max_draw_count,
+                stride,
+            )
+        })
     }
 
     fn validate_draw_indirect_count(
@@ -4216,36 +4250,42 @@ impl RecordingCommandBuffer {
         let fns = device.fns();
 
         if device.api_version() >= Version::V1_2 {
-            (fns.v1_2.cmd_draw_indirect_count)(
-                self.handle(),
-                indirect_buffer.buffer().handle(),
-                indirect_buffer.offset(),
-                count_buffer.buffer().handle(),
-                count_buffer.offset(),
-                max_draw_count,
-                stride,
-            );
+            unsafe {
+                (fns.v1_2.cmd_draw_indirect_count)(
+                    self.handle(),
+                    indirect_buffer.buffer().handle(),
+                    indirect_buffer.offset(),
+                    count_buffer.buffer().handle(),
+                    count_buffer.offset(),
+                    max_draw_count,
+                    stride,
+                )
+            };
         } else if device.enabled_extensions().khr_draw_indirect_count {
-            (fns.khr_draw_indirect_count.cmd_draw_indirect_count_khr)(
-                self.handle(),
-                indirect_buffer.buffer().handle(),
-                indirect_buffer.offset(),
-                count_buffer.buffer().handle(),
-                count_buffer.offset(),
-                max_draw_count,
-                stride,
-            );
+            unsafe {
+                (fns.khr_draw_indirect_count.cmd_draw_indirect_count_khr)(
+                    self.handle(),
+                    indirect_buffer.buffer().handle(),
+                    indirect_buffer.offset(),
+                    count_buffer.buffer().handle(),
+                    count_buffer.offset(),
+                    max_draw_count,
+                    stride,
+                )
+            };
         } else {
             debug_assert!(device.enabled_extensions().amd_draw_indirect_count);
-            (fns.amd_draw_indirect_count.cmd_draw_indirect_count_amd)(
-                self.handle(),
-                indirect_buffer.buffer().handle(),
-                indirect_buffer.offset(),
-                count_buffer.buffer().handle(),
-                count_buffer.offset(),
-                max_draw_count,
-                stride,
-            );
+            unsafe {
+                (fns.amd_draw_indirect_count.cmd_draw_indirect_count_amd)(
+                    self.handle(),
+                    indirect_buffer.buffer().handle(),
+                    indirect_buffer.offset(),
+                    count_buffer.buffer().handle(),
+                    count_buffer.offset(),
+                    max_draw_count,
+                    stride,
+                )
+            };
         }
 
         self
@@ -4268,13 +4308,15 @@ impl RecordingCommandBuffer {
             first_instance,
         )?;
 
-        Ok(self.draw_indexed_unchecked(
-            index_count,
-            instance_count,
-            first_index,
-            vertex_offset,
-            first_instance,
-        ))
+        Ok(unsafe {
+            self.draw_indexed_unchecked(
+                index_count,
+                instance_count,
+                first_index,
+                vertex_offset,
+                first_instance,
+            )
+        })
     }
 
     fn validate_draw_indexed(
@@ -4312,14 +4354,16 @@ impl RecordingCommandBuffer {
         first_instance: u32,
     ) -> &mut Self {
         let fns = self.device().fns();
-        (fns.v1_0.cmd_draw_indexed)(
-            self.handle(),
-            index_count,
-            instance_count,
-            first_index,
-            vertex_offset,
-            first_instance,
-        );
+        unsafe {
+            (fns.v1_0.cmd_draw_indexed)(
+                self.handle(),
+                index_count,
+                instance_count,
+                first_index,
+                vertex_offset,
+                first_instance,
+            )
+        };
 
         self
     }
@@ -4333,7 +4377,7 @@ impl RecordingCommandBuffer {
     ) -> Result<&mut Self, Box<ValidationError>> {
         self.validate_draw_indexed_indirect(indirect_buffer.as_bytes(), draw_count, stride)?;
 
-        Ok(self.draw_indexed_indirect_unchecked(indirect_buffer, draw_count, stride))
+        Ok(unsafe { self.draw_indexed_indirect_unchecked(indirect_buffer, draw_count, stride) })
     }
 
     fn validate_draw_indexed_indirect(
@@ -4448,13 +4492,15 @@ impl RecordingCommandBuffer {
         stride: u32,
     ) -> &mut Self {
         let fns = self.device().fns();
-        (fns.v1_0.cmd_draw_indexed_indirect)(
-            self.handle(),
-            indirect_buffer.buffer().handle(),
-            indirect_buffer.offset(),
-            draw_count,
-            stride,
-        );
+        unsafe {
+            (fns.v1_0.cmd_draw_indexed_indirect)(
+                self.handle(),
+                indirect_buffer.buffer().handle(),
+                indirect_buffer.offset(),
+                draw_count,
+                stride,
+            )
+        };
 
         self
     }
@@ -4474,12 +4520,14 @@ impl RecordingCommandBuffer {
             stride,
         )?;
 
-        Ok(self.draw_indexed_indirect_count_unchecked(
-            indirect_buffer,
-            count_buffer,
-            max_draw_count,
-            stride,
-        ))
+        Ok(unsafe {
+            self.draw_indexed_indirect_count_unchecked(
+                indirect_buffer,
+                count_buffer,
+                max_draw_count,
+                stride,
+            )
+        })
     }
 
     fn validate_draw_indexed_indirect_count(
@@ -4587,38 +4635,44 @@ impl RecordingCommandBuffer {
         let fns = device.fns();
 
         if device.api_version() >= Version::V1_2 {
-            (fns.v1_2.cmd_draw_indexed_indirect_count)(
-                self.handle(),
-                indirect_buffer.buffer().handle(),
-                indirect_buffer.offset(),
-                count_buffer.buffer().handle(),
-                count_buffer.offset(),
-                max_draw_count,
-                stride,
-            );
+            unsafe {
+                (fns.v1_2.cmd_draw_indexed_indirect_count)(
+                    self.handle(),
+                    indirect_buffer.buffer().handle(),
+                    indirect_buffer.offset(),
+                    count_buffer.buffer().handle(),
+                    count_buffer.offset(),
+                    max_draw_count,
+                    stride,
+                )
+            };
         } else if device.enabled_extensions().khr_draw_indirect_count {
-            (fns.khr_draw_indirect_count
-                .cmd_draw_indexed_indirect_count_khr)(
-                self.handle(),
-                indirect_buffer.buffer().handle(),
-                indirect_buffer.offset(),
-                count_buffer.buffer().handle(),
-                count_buffer.offset(),
-                max_draw_count,
-                stride,
-            );
+            unsafe {
+                (fns.khr_draw_indirect_count
+                    .cmd_draw_indexed_indirect_count_khr)(
+                    self.handle(),
+                    indirect_buffer.buffer().handle(),
+                    indirect_buffer.offset(),
+                    count_buffer.buffer().handle(),
+                    count_buffer.offset(),
+                    max_draw_count,
+                    stride,
+                )
+            };
         } else {
             debug_assert!(device.enabled_extensions().amd_draw_indirect_count);
-            (fns.amd_draw_indirect_count
-                .cmd_draw_indexed_indirect_count_amd)(
-                self.handle(),
-                indirect_buffer.buffer().handle(),
-                indirect_buffer.offset(),
-                count_buffer.buffer().handle(),
-                count_buffer.offset(),
-                max_draw_count,
-                stride,
-            );
+            unsafe {
+                (fns.amd_draw_indirect_count
+                    .cmd_draw_indexed_indirect_count_amd)(
+                    self.handle(),
+                    indirect_buffer.buffer().handle(),
+                    indirect_buffer.offset(),
+                    count_buffer.buffer().handle(),
+                    count_buffer.offset(),
+                    max_draw_count,
+                    stride,
+                )
+            };
         }
 
         self
@@ -4631,7 +4685,7 @@ impl RecordingCommandBuffer {
     ) -> Result<&mut Self, Box<ValidationError>> {
         self.validate_draw_mesh_tasks(group_counts)?;
 
-        Ok(self.draw_mesh_tasks_unchecked(group_counts))
+        Ok(unsafe { self.draw_mesh_tasks_unchecked(group_counts) })
     }
 
     fn validate_draw_mesh_tasks(
@@ -4667,12 +4721,14 @@ impl RecordingCommandBuffer {
     #[cfg_attr(not(feature = "document_unchecked"), doc(hidden))]
     pub unsafe fn draw_mesh_tasks_unchecked(&mut self, group_counts: [u32; 3]) -> &mut Self {
         let fns = self.device().fns();
-        (fns.ext_mesh_shader.cmd_draw_mesh_tasks_ext)(
-            self.handle(),
-            group_counts[0],
-            group_counts[1],
-            group_counts[2],
-        );
+        unsafe {
+            (fns.ext_mesh_shader.cmd_draw_mesh_tasks_ext)(
+                self.handle(),
+                group_counts[0],
+                group_counts[1],
+                group_counts[2],
+            )
+        };
 
         self
     }
@@ -4686,7 +4742,7 @@ impl RecordingCommandBuffer {
     ) -> Result<&mut Self, Box<ValidationError>> {
         self.validate_draw_mesh_tasks_indirect(indirect_buffer.as_bytes(), draw_count, stride)?;
 
-        Ok(self.draw_mesh_tasks_indirect_unchecked(indirect_buffer, draw_count, stride))
+        Ok(unsafe { self.draw_mesh_tasks_indirect_unchecked(indirect_buffer, draw_count, stride) })
     }
 
     fn validate_draw_mesh_tasks_indirect(
@@ -4823,13 +4879,15 @@ impl RecordingCommandBuffer {
         stride: u32,
     ) -> &mut Self {
         let fns = self.device().fns();
-        (fns.ext_mesh_shader.cmd_draw_mesh_tasks_indirect_ext)(
-            self.handle(),
-            indirect_buffer.buffer().handle(),
-            indirect_buffer.offset(),
-            draw_count,
-            stride,
-        );
+        unsafe {
+            (fns.ext_mesh_shader.cmd_draw_mesh_tasks_indirect_ext)(
+                self.handle(),
+                indirect_buffer.buffer().handle(),
+                indirect_buffer.offset(),
+                draw_count,
+                stride,
+            )
+        };
 
         self
     }
@@ -4849,12 +4907,14 @@ impl RecordingCommandBuffer {
             stride,
         )?;
 
-        Ok(self.draw_mesh_tasks_indirect_count_unchecked(
-            indirect_buffer,
-            count_buffer,
-            max_draw_count,
-            stride,
-        ))
+        Ok(unsafe {
+            self.draw_mesh_tasks_indirect_count_unchecked(
+                indirect_buffer,
+                count_buffer,
+                max_draw_count,
+                stride,
+            )
+        })
     }
 
     fn validate_draw_mesh_tasks_indirect_count(
@@ -4969,15 +5029,17 @@ impl RecordingCommandBuffer {
     ) -> &mut Self {
         let fns = self.device().fns();
 
-        (fns.ext_mesh_shader.cmd_draw_mesh_tasks_indirect_count_ext)(
-            self.handle(),
-            indirect_buffer.buffer().handle(),
-            indirect_buffer.offset(),
-            count_buffer.buffer().handle(),
-            count_buffer.offset(),
-            max_draw_count,
-            stride,
-        );
+        unsafe {
+            (fns.ext_mesh_shader.cmd_draw_mesh_tasks_indirect_count_ext)(
+                self.handle(),
+                indirect_buffer.buffer().handle(),
+                indirect_buffer.offset(),
+                count_buffer.buffer().handle(),
+                count_buffer.offset(),
+                max_draw_count,
+                stride,
+            )
+        };
 
         self
     }
@@ -4985,21 +5047,17 @@ impl RecordingCommandBuffer {
     pub unsafe fn trace_rays(
         &mut self,
         shader_binding_table_addresses: &ShaderBindingTableAddresses,
-        width: u32,
-        height: u32,
-        depth: u32,
+        dimensions: [u32; 3],
     ) -> Result<&mut Self, Box<ValidationError>> {
-        self.validate_trace_rays(shader_binding_table_addresses, width, height, depth)?;
+        self.validate_trace_rays(shader_binding_table_addresses, dimensions)?;
 
-        Ok(self.trace_rays_unchecked(shader_binding_table_addresses, width, height, depth))
+        Ok(unsafe { self.trace_rays_unchecked(shader_binding_table_addresses, dimensions) })
     }
 
     fn validate_trace_rays(
         &self,
         _shader_binding_table_addresses: &ShaderBindingTableAddresses,
-        width: u32,
-        height: u32,
-        depth: u32,
+        dimensions: [u32; 3],
     ) -> Result<(), Box<ValidationError>> {
         if !self.device().enabled_features().ray_tracing_pipeline {
             return Err(Box::new(ValidationError {
@@ -5026,9 +5084,9 @@ impl RecordingCommandBuffer {
 
         let device_properties = self.device().physical_device().properties();
 
-        let width = width as u64;
-        let height = height as u64;
-        let depth = depth as u64;
+        let width = dimensions[0] as u64;
+        let height = dimensions[1] as u64;
+        let depth = dimensions[2] as u64;
 
         let max_width = device_properties.max_compute_work_group_count[0] as u64
             * device_properties.max_compute_work_group_size[0] as u64;
@@ -5036,7 +5094,9 @@ impl RecordingCommandBuffer {
         if width > max_width {
             return Err(Box::new(ValidationError {
                 context: "width".into(),
-                problem: "exceeds maxComputeWorkGroupCount[0] * maxComputeWorkGroupSize[0]".into(),
+                problem: "exceeds `max_compute_work_group_count[0] * \
+                    max_compute_work_group_size[0]`"
+                    .into(),
                 vuids: &["VUID-vkCmdTraceRaysKHR-width-03638"],
                 ..Default::default()
             }));
@@ -5048,7 +5108,9 @@ impl RecordingCommandBuffer {
         if height > max_height {
             return Err(Box::new(ValidationError {
                 context: "height".into(),
-                problem: "exceeds maxComputeWorkGroupCount[1] * maxComputeWorkGroupSize[1]".into(),
+                problem: "exceeds `max_compute_work_group_count[1] * \
+                    max_compute_work_group_size[1]`"
+                    .into(),
                 vuids: &["VUID-vkCmdTraceRaysKHR-height-03639"],
                 ..Default::default()
             }));
@@ -5060,7 +5122,9 @@ impl RecordingCommandBuffer {
         if depth > max_depth {
             return Err(Box::new(ValidationError {
                 context: "depth".into(),
-                problem: "exceeds maxComputeWorkGroupCount[2] * maxComputeWorkGroupSize[2]".into(),
+                problem: "exceeds `max_compute_work_group_count[2] * \
+                    max_compute_work_group_size[2]`"
+                    .into(),
                 vuids: &["VUID-vkCmdTraceRaysKHR-depth-03640"],
                 ..Default::default()
             }));
@@ -5072,7 +5136,7 @@ impl RecordingCommandBuffer {
         if total_invocations > max_invocations {
             return Err(Box::new(ValidationError {
                 context: "width * height * depth".into(),
-                problem: "exceeds maxRayDispatchInvocationCount".into(),
+                problem: "exceeds `max_ray_dispatch_invocation_count`".into(),
                 vuids: &["VUID-vkCmdTraceRaysKHR-width-03641"],
                 ..Default::default()
             }));
@@ -5085,27 +5149,27 @@ impl RecordingCommandBuffer {
     pub unsafe fn trace_rays_unchecked(
         &mut self,
         shader_binding_table_addresses: &ShaderBindingTableAddresses,
-        width: u32,
-        height: u32,
-        depth: u32,
+        dimensions: [u32; 3],
     ) -> &mut Self {
-        let fns = self.device().fns();
-
         let raygen = shader_binding_table_addresses.raygen.to_vk();
         let miss = shader_binding_table_addresses.miss.to_vk();
         let hit = shader_binding_table_addresses.hit.to_vk();
         let callable = shader_binding_table_addresses.callable.to_vk();
 
-        (fns.khr_ray_tracing_pipeline.cmd_trace_rays_khr)(
-            self.handle(),
-            &raygen,
-            &miss,
-            &hit,
-            &callable,
-            width,
-            height,
-            depth,
-        );
+        let fns = self.device().fns();
+
+        unsafe {
+            (fns.khr_ray_tracing_pipeline.cmd_trace_rays_khr)(
+                self.handle(),
+                &raygen,
+                &miss,
+                &hit,
+                &callable,
+                dimensions[0],
+                dimensions[1],
+                dimensions[2],
+            )
+        };
 
         self
     }
