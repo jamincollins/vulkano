@@ -75,6 +75,7 @@ use crate::{
     sync::PipelineStageAccessFlags,
     DeviceSize, ValidationError, VulkanObject,
 };
+use ash::vk;
 use parking_lot::{Mutex, MutexGuard};
 use std::{
     fmt::{Debug, Error as FmtError, Formatter},
@@ -95,7 +96,7 @@ pub struct PrimaryAutoCommandBuffer {
 }
 
 unsafe impl VulkanObject for PrimaryAutoCommandBuffer {
-    type Handle = ash::vk::CommandBuffer;
+    type Handle = vk::CommandBuffer;
 
     #[inline]
     fn handle(&self) -> Self::Handle {
@@ -151,7 +152,7 @@ pub struct SecondaryAutoCommandBuffer {
 }
 
 unsafe impl VulkanObject for SecondaryAutoCommandBuffer {
-    type Handle = ash::vk::CommandBuffer;
+    type Handle = vk::CommandBuffer;
 
     #[inline]
     fn handle(&self) -> Self::Handle {
@@ -435,7 +436,7 @@ mod tests {
                 ..Default::default()
             }]
             .into(),
-            ..CopyBufferInfoTyped::buffers(source, destination.clone())
+            ..CopyBufferInfoTyped::new(source, destination.clone())
         })
         .unwrap();
 
@@ -559,7 +560,7 @@ mod tests {
                     ..Default::default()
                 }]
                 .into(),
-                ..CopyBufferInfoTyped::buffers(source.clone(), source.clone())
+                ..CopyBufferInfoTyped::new(source.clone(), source.clone())
             })
             .unwrap();
 
@@ -617,7 +618,7 @@ mod tests {
                     ..Default::default()
                 }]
                 .into(),
-                ..CopyBufferInfoTyped::buffers(source.clone(), source)
+                ..CopyBufferInfoTyped::new(source.clone(), source)
             })
             .is_err());
     }
@@ -684,11 +685,10 @@ mod tests {
             .collect::<Vec<_>>();
 
         {
-            let mut builder = AutoCommandBufferBuilder::secondary(
+            let mut builder = AutoCommandBufferBuilder::primary(
                 cb_allocator.clone(),
                 queue.queue_family_index(),
                 CommandBufferUsage::SimultaneousUse,
-                Default::default(),
             )
             .unwrap();
 
@@ -710,11 +710,10 @@ mod tests {
         }
 
         {
-            let mut builder = AutoCommandBufferBuilder::secondary(
+            let mut builder = AutoCommandBufferBuilder::primary(
                 cb_allocator,
                 queue.queue_family_index(),
                 CommandBufferUsage::SimultaneousUse,
-                Default::default(),
             )
             .unwrap();
 
@@ -788,7 +787,7 @@ mod tests {
                     0,
                     DescriptorSetLayoutBinding {
                         stages: ShaderStages::all_graphics(),
-                        ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::Sampler)
+                        ..DescriptorSetLayoutBinding::new(DescriptorType::Sampler)
                     },
                 )]
                 .into(),
@@ -834,22 +833,22 @@ mod tests {
             .builder_state
             .descriptor_sets
             .get(&PipelineBindPoint::Compute)
-            .map_or(false, |state| state.descriptor_sets.contains_key(&0)));
+            .is_some_and(|state| state.descriptor_sets.contains_key(&0)));
         assert!(!sync
             .builder_state
             .descriptor_sets
             .get(&PipelineBindPoint::Graphics)
-            .map_or(false, |state| state.descriptor_sets.contains_key(&0)));
+            .is_some_and(|state| state.descriptor_sets.contains_key(&0)));
         assert!(sync
             .builder_state
             .descriptor_sets
             .get(&PipelineBindPoint::Graphics)
-            .map_or(false, |state| state.descriptor_sets.contains_key(&1)));
+            .is_some_and(|state| state.descriptor_sets.contains_key(&1)));
         assert!(!sync
             .builder_state
             .descriptor_sets
             .get(&PipelineBindPoint::Graphics)
-            .map_or(false, |state| state.descriptor_sets.contains_key(&2)));
+            .is_some_and(|state| state.descriptor_sets.contains_key(&2)));
 
         unsafe {
             sync.bind_descriptor_sets_unchecked(
@@ -864,12 +863,12 @@ mod tests {
             .builder_state
             .descriptor_sets
             .get(&PipelineBindPoint::Graphics)
-            .map_or(false, |state| state.descriptor_sets.contains_key(&0)));
+            .is_some_and(|state| state.descriptor_sets.contains_key(&0)));
         assert!(sync
             .builder_state
             .descriptor_sets
             .get(&PipelineBindPoint::Graphics)
-            .map_or(false, |state| state.descriptor_sets.contains_key(&1)));
+            .is_some_and(|state| state.descriptor_sets.contains_key(&1)));
 
         let pipeline_layout = PipelineLayout::new(
             device.clone(),
@@ -908,11 +907,11 @@ mod tests {
             .builder_state
             .descriptor_sets
             .get(&PipelineBindPoint::Graphics)
-            .map_or(false, |state| state.descriptor_sets.contains_key(&0)));
+            .is_some_and(|state| state.descriptor_sets.contains_key(&0)));
         assert!(sync
             .builder_state
             .descriptor_sets
             .get(&PipelineBindPoint::Graphics)
-            .map_or(false, |state| state.descriptor_sets.contains_key(&1)));
+            .is_some_and(|state| state.descriptor_sets.contains_key(&1)));
     }
 }

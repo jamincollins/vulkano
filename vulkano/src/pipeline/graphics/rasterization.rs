@@ -3,6 +3,7 @@
 use crate::{
     device::Device, macros::vulkan_enum, Requires, RequiresAllOf, RequiresOneOf, ValidationError,
 };
+use ash::vk;
 
 /// The state in a graphics pipeline describing how the rasterization stage should behave.
 #[derive(Clone, Debug)]
@@ -95,30 +96,27 @@ pub struct RasterizationState {
 impl Default for RasterizationState {
     #[inline]
     fn default() -> Self {
-        Self {
-            depth_clamp_enable: false,
-            rasterizer_discard_enable: false,
-            polygon_mode: Default::default(),
-            cull_mode: Default::default(),
-            front_face: Default::default(),
-            depth_bias: None,
-            line_width: 1.0,
-            line_rasterization_mode: Default::default(),
-            line_stipple: None,
-            conservative: None,
-            _ne: crate::NonExhaustive(()),
-        }
+        Self::new()
     }
 }
 
 impl RasterizationState {
-    /// Creates a `RasterizationState` with depth clamping, discard, depth biasing and line
-    /// stippling disabled, filled polygons, no culling, counterclockwise front face, and the
-    /// default line width and line rasterization mode.
+    /// Returns a default `RasterizationState`.
     #[inline]
-    #[deprecated(since = "0.34.0", note = "use `RasterizationState::default` instead")]
-    pub fn new() -> Self {
-        Self::default()
+    pub const fn new() -> Self {
+        Self {
+            depth_clamp_enable: false,
+            rasterizer_discard_enable: false,
+            polygon_mode: PolygonMode::Fill,
+            cull_mode: CullMode::None,
+            front_face: FrontFace::CounterClockwise,
+            depth_bias: None,
+            line_width: 1.0,
+            line_rasterization_mode: LineRasterizationMode::Default,
+            line_stipple: None,
+            conservative: None,
+            _ne: crate::NonExhaustive(()),
+        }
     }
 
     /// Sets the polygon mode.
@@ -380,7 +378,7 @@ impl RasterizationState {
     pub(crate) fn to_vk<'a>(
         &self,
         extensions_vk: &'a mut RasterizationStateExtensionsVk,
-    ) -> ash::vk::PipelineRasterizationStateCreateInfo<'a> {
+    ) -> vk::PipelineRasterizationStateCreateInfo<'a> {
         let &Self {
             depth_clamp_enable,
             rasterizer_discard_enable,
@@ -412,8 +410,8 @@ impl RasterizationState {
             (false, 0.0, 0.0, 0.0)
         };
 
-        let mut val_vk = ash::vk::PipelineRasterizationStateCreateInfo::default()
-            .flags(ash::vk::PipelineRasterizationStateCreateFlags::empty())
+        let mut val_vk = vk::PipelineRasterizationStateCreateInfo::default()
+            .flags(vk::PipelineRasterizationStateCreateFlags::empty())
             .depth_clamp_enable(depth_clamp_enable)
             .rasterizer_discard_enable(rasterizer_discard_enable)
             .polygon_mode(polygon_mode.into())
@@ -457,7 +455,7 @@ impl RasterizationState {
                     (false, 1, 0)
                 };
 
-            ash::vk::PipelineRasterizationLineStateCreateInfoKHR::default()
+            vk::PipelineRasterizationLineStateCreateInfoKHR::default()
                 .line_rasterization_mode(line_rasterization_mode.into())
                 .stippled_line_enable(stippled_line_enable)
                 .line_stipple_factor(line_stipple_factor)
@@ -475,9 +473,9 @@ impl RasterizationState {
 }
 
 pub(crate) struct RasterizationStateExtensionsVk {
-    pub(crate) line_vk: Option<ash::vk::PipelineRasterizationLineStateCreateInfoKHR<'static>>,
+    pub(crate) line_vk: Option<vk::PipelineRasterizationLineStateCreateInfoKHR<'static>>,
     pub(crate) conservative_vk:
-        Option<ash::vk::PipelineRasterizationConservativeStateCreateInfoEXT<'static>>,
+        Option<vk::PipelineRasterizationConservativeStateCreateInfoEXT<'static>>,
 }
 
 /// The values to use for depth biasing.
@@ -506,6 +504,14 @@ pub struct DepthBiasState {
 impl Default for DepthBiasState {
     #[inline]
     fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DepthBiasState {
+    /// Returns a default `DepthBiasState`.
+    #[inline]
+    pub const fn new() -> Self {
         Self {
             constant_factor: 1.0,
             clamp: 0.0,
@@ -642,7 +648,6 @@ vulkan_enum! {
 }
 
 impl Default for LineRasterizationMode {
-    /// Returns `LineRasterizationMode::Default`.
     #[inline]
     fn default() -> Self {
         Self::Default
@@ -681,15 +686,21 @@ pub struct RasterizationConservativeState {
 impl Default for RasterizationConservativeState {
     #[inline]
     fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RasterizationConservativeState {
+    /// Returns a default `RasterizationConservativeState`.
+    #[inline]
+    pub const fn new() -> Self {
         Self {
             mode: ConservativeRasterizationMode::Disabled,
             overestimation_size: 0.0,
             _ne: crate::NonExhaustive(()),
         }
     }
-}
 
-impl RasterizationConservativeState {
     pub(crate) fn validate(&self, device: &Device) -> Result<(), Box<ValidationError>> {
         let &Self {
             mode,
@@ -721,17 +732,15 @@ impl RasterizationConservativeState {
         Ok(())
     }
 
-    pub(crate) fn to_vk(
-        &self,
-    ) -> ash::vk::PipelineRasterizationConservativeStateCreateInfoEXT<'static> {
+    pub(crate) fn to_vk(&self) -> vk::PipelineRasterizationConservativeStateCreateInfoEXT<'static> {
         let &Self {
             mode,
             overestimation_size,
             _ne: _,
         } = self;
 
-        ash::vk::PipelineRasterizationConservativeStateCreateInfoEXT::default()
-            .flags(ash::vk::PipelineRasterizationConservativeStateCreateFlagsEXT::empty())
+        vk::PipelineRasterizationConservativeStateCreateInfoEXT::default()
+            .flags(vk::PipelineRasterizationConservativeStateCreateFlagsEXT::empty())
             .conservative_rasterization_mode(mode.into())
             .extra_primitive_overestimation_size(overestimation_size)
     }

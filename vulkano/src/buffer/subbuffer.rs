@@ -10,8 +10,9 @@ use crate::{
         is_aligned, DeviceAlignment, MappedMemoryRange,
     },
     sync::HostAccessError,
-    DeviceSize, NonNullDeviceAddress, NonZeroDeviceSize, ValidationError,
+    DeviceAddress, DeviceSize, ValidationError,
 };
+use ash::vk;
 use bytemuck::AnyBitPattern;
 use std::{
     alloc::Layout,
@@ -19,6 +20,7 @@ use std::{
     hash::{Hash, Hasher},
     marker::PhantomData,
     mem::{self, align_of, size_of},
+    num::NonZero,
     ops::{Deref, DerefMut, Range, RangeBounds},
     ptr::{self, NonNull},
     sync::Arc,
@@ -128,23 +130,23 @@ impl<T: ?Sized> Subbuffer<T> {
     }
 
     /// Returns the device address for this subbuffer.
-    pub fn device_address(&self) -> Result<NonNullDeviceAddress, Box<ValidationError>> {
+    pub fn device_address(&self) -> Result<NonZero<DeviceAddress>, Box<ValidationError>> {
         self.buffer().device_address().map(|ptr| {
             // SAFETY: The original address came from the Vulkan implementation, and allocation
             // sizes are guaranteed to not exceed `DeviceLayout::MAX_SIZE`, so the offset better be
             // in range.
-            unsafe { NonNullDeviceAddress::new_unchecked(ptr.get() + self.offset) }
+            unsafe { NonZero::new_unchecked(ptr.get() + self.offset) }
         })
     }
 
     #[cfg_attr(not(feature = "document_unchecked"), doc(hidden))]
-    pub unsafe fn device_address_unchecked(&self) -> NonNullDeviceAddress {
+    pub unsafe fn device_address_unchecked(&self) -> NonZero<DeviceAddress> {
+        let buffer_device_address = unsafe { self.buffer().device_address_unchecked() };
+
         // SAFETY: The original address came from the Vulkan implementation, and allocation
         // sizes are guaranteed to not exceed `DeviceLayout::MAX_SIZE`, so the offset better be
         // in range.
-        NonNullDeviceAddress::new_unchecked(
-            self.buffer().device_address_unchecked().get() + self.offset,
-        )
+        unsafe { NonZero::new_unchecked(buffer_device_address.get() + self.offset) }
     }
 
     /// Casts the subbuffer to a slice of raw bytes.
@@ -162,7 +164,7 @@ impl<T: ?Sized> Subbuffer<T> {
     #[inline(always)]
     unsafe fn reinterpret_unchecked_inner<U: ?Sized>(self) -> Subbuffer<U> {
         // SAFETY: All `Subbuffer`s share the same layout.
-        mem::transmute::<Subbuffer<T>, Subbuffer<U>>(self)
+        unsafe { mem::transmute::<Subbuffer<T>, Subbuffer<U>>(self) }
     }
 
     #[inline(always)]
@@ -171,11 +173,11 @@ impl<T: ?Sized> Subbuffer<T> {
         assert_eq!(align_of::<Subbuffer<T>>(), align_of::<Subbuffer<U>>());
 
         // SAFETY: All `Subbuffer`s share the same layout.
-        mem::transmute::<&Subbuffer<T>, &Subbuffer<U>>(self)
+        unsafe { mem::transmute::<&Subbuffer<T>, &Subbuffer<U>>(self) }
     }
 
-    pub(crate) fn to_vk_device_or_host_address(&self) -> ash::vk::DeviceOrHostAddressKHR {
-        ash::vk::DeviceOrHostAddressKHR {
+    pub(crate) fn to_vk_device_or_host_address(&self) -> vk::DeviceOrHostAddressKHR {
+        vk::DeviceOrHostAddressKHR {
             device_address: self
                 .device_address()
                 .expect("Can't get device address. Is the extension enabled?")
@@ -183,10 +185,8 @@ impl<T: ?Sized> Subbuffer<T> {
         }
     }
 
-    pub(crate) fn to_vk_device_or_host_address_const(
-        &self,
-    ) -> ash::vk::DeviceOrHostAddressConstKHR {
-        ash::vk::DeviceOrHostAddressConstKHR {
+    pub(crate) fn to_vk_device_or_host_address_const(&self) -> vk::DeviceOrHostAddressConstKHR {
+        vk::DeviceOrHostAddressConstKHR {
             device_address: self
                 .device_address()
                 .expect("Can't get device address. Is the extension enabled?")
@@ -244,7 +244,7 @@ where
         #[cfg(debug_assertions)]
         self.validate_reinterpret(U::LAYOUT);
 
-        self.reinterpret_unchecked_inner()
+        unsafe { self.reinterpret_unchecked_inner() }
     }
 
     /// Same as [`reinterpret`], except it works with a reference to the subbuffer.
@@ -274,7 +274,7 @@ where
         #[cfg(debug_assertions)]
         self.validate_reinterpret(U::LAYOUT);
 
-        self.reinterpret_unchecked_ref_inner()
+        unsafe { self.reinterpret_unchecked_ref_inner() }
     }
 
     fn validate_reinterpret(&self, new_layout: BufferContentsLayout) {
@@ -560,10 +560,9 @@ impl<T> Subbuffer<[T]> {
 
     #[cfg_attr(not(feature = "document_unchecked"), doc(hidden))]
     pub unsafe fn split_at_unchecked(self, mid: DeviceSize) -> (Subbuffer<[T]>, Subbuffer<[T]>) {
-        (
-            self.clone().slice_unchecked(..mid),
-            self.slice_unchecked(mid..),
-        )
+        let first = unsafe { self.clone().slice_unchecked(..mid) };
+        let second = unsafe { self.slice_unchecked(mid..) };
+        (first, second)
     }
 }
 
@@ -1097,8 +1096,7 @@ impl BufferContentsLayout {
                 // SAFETY: `BufferContentsLayout`'s invariant guarantees that the alignment of the
                 // element type doesn't exceed 64, which together with the overflow invariant of
                 // `DeviceLayout` means that this can't overflow.
-                let padded_head_size =
-                    unsafe { NonZeroDeviceSize::new_unchecked(padded_head_size) };
+                let padded_head_size = unsafe { NonZero::new_unchecked(padded_head_size) };
 
                 // We have to align the head to the alignment of the element type, so that the
                 // struct as a whole is aligned correctly when a different struct is extended with

@@ -4,6 +4,7 @@
 use crate::{
     device::Device, image::SampleCount, Requires, RequiresAllOf, RequiresOneOf, ValidationError,
 };
+use ash::vk;
 
 // TODO: handle some weird behaviors with non-floating-point targets
 
@@ -62,6 +63,14 @@ pub struct MultisampleState {
 impl Default for MultisampleState {
     #[inline]
     fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MultisampleState {
+    /// Returns a default `MultisampleState`.
+    #[inline]
+    pub const fn new() -> Self {
         Self {
             rasterization_samples: SampleCount::Sample1,
             sample_shading: None,
@@ -70,15 +79,6 @@ impl Default for MultisampleState {
             alpha_to_one_enable: false,
             _ne: crate::NonExhaustive(()),
         }
-    }
-}
-
-impl MultisampleState {
-    /// Creates a `MultisampleState` with multisampling disabled.
-    #[inline]
-    #[deprecated(since = "0.34.0", note = "use `MultisampleState::default` instead")]
-    pub fn new() -> MultisampleState {
-        Self::default()
     }
 
     pub(crate) fn validate(&self, device: &Device) -> Result<(), Box<ValidationError>> {
@@ -135,7 +135,7 @@ impl MultisampleState {
         Ok(())
     }
 
-    pub(crate) fn to_vk(&self) -> ash::vk::PipelineMultisampleStateCreateInfo<'_> {
+    pub(crate) fn to_vk(&self) -> vk::PipelineMultisampleStateCreateInfo<'_> {
         let &Self {
             rasterization_samples,
             sample_shading,
@@ -152,8 +152,8 @@ impl MultisampleState {
                 (false, 0.0)
             };
 
-        ash::vk::PipelineMultisampleStateCreateInfo::default()
-            .flags(ash::vk::PipelineMultisampleStateCreateFlags::empty())
+        vk::PipelineMultisampleStateCreateInfo::default()
+            .flags(vk::PipelineMultisampleStateCreateFlags::empty())
             .rasterization_samples(rasterization_samples.into())
             .sample_shading_enable(sample_shading_enable_vk)
             .min_sample_shading(min_sample_shading_vk)

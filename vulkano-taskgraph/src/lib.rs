@@ -1,10 +1,13 @@
-#![forbid(unsafe_op_in_unsafe_fn)]
+//! Vulkano's **EXPERIMENTAL** task graph implementation. Expect many bugs and incomplete features.
+//! There is also currently no validation except the most barebones sanity checks. You may also get
+//! panics in random places.
 
 use command_buffer::RecordingCommandBuffer;
-use concurrent_slotmap::SlotId;
+use concurrent_slotmap::{epoch, Key, SlotId};
 use graph::{CompileInfo, ExecuteError, ResourceMap, TaskGraph};
+use linear_map::LinearMap;
 use resource::{
-    AccessType, BufferState, Flight, HostAccessType, ImageLayoutType, ImageState, Resources,
+    AccessTypes, BufferState, Flight, HostAccessType, ImageLayoutType, ImageState, Resources,
     SwapchainState,
 };
 use std::{
@@ -23,14 +26,19 @@ use vulkano::{
     buffer::{Buffer, BufferContents, BufferMemory, Subbuffer},
     command_buffer as raw,
     device::Queue,
+    format::ClearValue,
     image::Image,
+    render_pass::Framebuffer,
     swapchain::Swapchain,
     DeviceSize, ValidationError,
 };
 
 pub mod command_buffer;
+pub mod descriptor_set;
 pub mod graph;
+mod linear_map;
 pub mod resource;
+mod slotmap;
 
 /// Creates a [`TaskGraph`] with one task node, compiles it, and executes it.
 pub unsafe fn execute(
@@ -39,8 +47,8 @@ pub unsafe fn execute(
     flight_id: Id<Flight>,
     task: impl FnOnce(&mut RecordingCommandBuffer<'_>, &mut TaskContext<'_>) -> TaskResult,
     host_buffer_accesses: impl IntoIterator<Item = (Id<Buffer>, HostAccessType)>,
-    buffer_accesses: impl IntoIterator<Item = (Id<Buffer>, AccessType)>,
-    image_accesses: impl IntoIterator<Item = (Id<Image>, AccessType, ImageLayoutType)>,
+    buffer_accesses: impl IntoIterator<Item = (Id<Buffer>, AccessTypes)>,
+    image_accesses: impl IntoIterator<Item = (Id<Image>, AccessTypes, ImageLayoutType)>,
 ) -> Result<(), ExecuteError> {
     #[repr(transparent)]
     struct OnceTask<'a>(
@@ -75,7 +83,7 @@ pub unsafe fn execute(
         (Cell::take(&task).unwrap())(cbf, tcx)
     };
 
-    let mut task_graph = TaskGraph::new(resources, 1, 64 * 1024);
+    let mut task_graph = TaskGraph::new(resources);
 
     for (id, access_type) in host_buffer_accesses {
         task_graph.add_host_buffer_access(id, access_type);
@@ -91,12 +99,12 @@ pub unsafe fn execute(
         unsafe { mem::transmute::<OnceTask<'_>, OnceTask<'static>>(OnceTask(&trampoline)) },
     );
 
-    for (id, access_type) in buffer_accesses {
-        node.buffer_access(id, access_type);
+    for (id, access_types) in buffer_accesses {
+        node.buffer_access(id, access_types);
     }
 
-    for (id, access_type, layout_type) in image_accesses {
-        node.image_access(id, access_type, layout_type);
+    for (id, access_types, layout_type) in image_accesses {
+        node.image_access(id, access_types, layout_type);
     }
 
     // SAFETY:
@@ -125,6 +133,19 @@ pub trait Task: Any + Send + Sync {
 
     // Potentially TODO:
     // fn update(&mut self, ...) {}
+
+    /// If the task node was created with any attachments which were [set to be cleared], this
+    /// method is invoked to allow the task to set clear values for such attachments.
+    ///
+    /// This method is invoked at least once for every attachment to be cleared before every
+    /// execution of the task. It's possible that it is invoked multiple times before the task is
+    /// executed, and it may not be invoked right before [`execute`], just at some point between
+    /// when the task graph has begun execution and when the task is executed.
+    ///
+    /// [set to be cleared]: graph::AttachmentInfo::clear
+    /// [`execute`]: Self::execute
+    #[allow(unused)]
+    fn clear_values(&self, clear_values: &mut ClearValues<'_>) {}
 
     /// Executes the task, which should record its commands using the provided command buffer and
     /// context.
@@ -535,6 +556,45 @@ impl<'a> TaskContext<'a> {
     }
 }
 
+/// Stores the clear value for each attachment that was [set to be cleared] when creating the task
+/// node.
+///
+/// This is used to set the clear values in [`Task::clear_values`].
+///
+/// [set to be cleared]: graph::AttachmentInfo::clear
+pub struct ClearValues<'a> {
+    inner: &'a mut LinearMap<Id, Option<ClearValue>>,
+    resource_map: &'a ResourceMap<'a>,
+}
+
+impl ClearValues<'_> {
+    /// Sets the clear value for the image corresponding to `id`.
+    #[inline]
+    pub fn set(&mut self, id: Id<Image>, clear_value: impl Into<ClearValue>) {
+        self.set_inner(id, clear_value.into());
+    }
+
+    fn set_inner(&mut self, id: Id<Image>, clear_value: ClearValue) {
+        let mut id = id.erase();
+
+        if !id.is_virtual() {
+            let virtual_resources = self.resource_map.virtual_resources();
+
+            if let Some(&virtual_id) = virtual_resources.physical_map().get(&id.erase()) {
+                id = virtual_id;
+            } else {
+                return;
+            }
+        }
+
+        if let Some(value) = self.inner.get_mut(&id) {
+            if value.is_none() {
+                *value = Some(clear_value);
+            }
+        }
+    }
+}
+
 /// The type of result returned by a task.
 pub type TaskResult<T = (), E = TaskError> = ::std::result::Result<T, E>;
 
@@ -725,7 +785,7 @@ impl Id<Swapchain> {
 }
 
 impl Id {
-    const OBJECT_TYPE_MASK: u32 = 0b11;
+    const OBJECT_TYPE_MASK: u32 = 0b111;
 
     const VIRTUAL_BIT: u32 = 1 << 7;
     const EXCLUSIVE_BIT: u32 = 1 << 6;
@@ -750,14 +810,7 @@ impl<T> Copy for Id<T> {}
 
 impl<T> fmt::Debug for Id<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if *self == Id::INVALID {
-            f.pad("Id::INVALID")
-        } else {
-            f.debug_struct("Id")
-                .field("index", &self.slot.index())
-                .field("generation", &self.slot.generation())
-                .finish()
-        }
+        fmt::Debug::fmt(&self.slot, f)
     }
 }
 
@@ -774,6 +827,32 @@ impl<T> Hash for Id<T> {
     #[inline]
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.slot.hash(state);
+    }
+}
+
+#[doc(hidden)]
+impl Key for Id {
+    #[inline]
+    fn from_id(id: SlotId) -> Self {
+        unsafe { Id::new(id) }
+    }
+
+    #[inline]
+    fn as_id(self) -> SlotId {
+        self.slot
+    }
+}
+
+#[doc(hidden)]
+impl Key for Id<Framebuffer> {
+    #[inline]
+    fn from_id(id: SlotId) -> Self {
+        unsafe { Id::new(id) }
+    }
+
+    #[inline]
+    fn as_id(self) -> SlotId {
+        self.slot
     }
 }
 
@@ -796,20 +875,24 @@ impl<T> Ord for Id<T> {
 /// When you use [`Id`] to retrieve something, you can get back a `Ref` with the same type
 /// parameter, which you can then dereference to get at the underlying data denoted by the type
 /// parameter.
-pub struct Ref<'a, T>(concurrent_slotmap::Ref<'a, T>);
+pub struct Ref<'a, T> {
+    inner: &'a T,
+    #[allow(unused)]
+    guard: epoch::Guard<'a>,
+}
 
 impl<T> Deref for Ref<'_, T> {
     type Target = T;
 
     #[inline]
     fn deref(&self) -> &Self::Target {
-        &self.0
+        self.inner
     }
 }
 
 impl<T: fmt::Debug> fmt::Debug for Ref<'_, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Debug::fmt(&self.0, f)
+        fmt::Debug::fmt(self.inner, f)
     }
 }
 
@@ -835,16 +918,27 @@ impl Object for Flight {
     const TYPE: ObjectType = ObjectType::Flight;
 }
 
+impl Object for Framebuffer {
+    const TYPE: ObjectType = ObjectType::Framebuffer;
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ObjectType {
     Buffer = 0,
     Image = 1,
     Swapchain = 2,
     Flight = 3,
+    Framebuffer = 4,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct NonExhaustive<'a>(PhantomData<&'a ()>);
+
+impl fmt::Debug for NonExhaustive<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad("NonExhaustive")
+    }
+}
 
 const NE: NonExhaustive<'static> = NonExhaustive(PhantomData);
 
@@ -889,7 +983,7 @@ mod tests {
             };
 
             (
-                $crate::resource::Resources::new(&device, &Default::default()),
+                $crate::resource::Resources::new(&device, &Default::default()).unwrap(),
                 queues.collect::<Vec<_>>(),
             )
         }};

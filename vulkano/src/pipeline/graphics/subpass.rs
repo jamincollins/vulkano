@@ -6,6 +6,7 @@ use crate::{
     render_pass::Subpass,
     Requires, RequiresAllOf, RequiresOneOf, ValidationError,
 };
+use ash::vk;
 use smallvec::SmallVec;
 
 /// Selects the type of subpass that a graphics pipeline is created for.
@@ -19,7 +20,7 @@ impl PipelineSubpassType {
     pub(crate) fn to_vk_rendering<'a>(
         &self,
         fields1_vk: &'a PipelineRenderingCreateInfoFields1Vk,
-    ) -> ash::vk::PipelineRenderingCreateInfo<'a> {
+    ) -> vk::PipelineRenderingCreateInfo<'a> {
         match self {
             PipelineSubpassType::BeginRenderPass(_) => unreachable!(),
             PipelineSubpassType::BeginRendering(rendering_info) => rendering_info.to_vk(fields1_vk),
@@ -90,6 +91,14 @@ pub struct PipelineRenderingCreateInfo {
 impl Default for PipelineRenderingCreateInfo {
     #[inline]
     fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PipelineRenderingCreateInfo {
+    /// Returns a default `PipelineRenderingCreateInfo`.
+    #[inline]
+    pub const fn new() -> Self {
         Self {
             view_mask: 0,
             color_attachment_formats: Vec::new(),
@@ -98,9 +107,7 @@ impl Default for PipelineRenderingCreateInfo {
             _ne: crate::NonExhaustive(()),
         }
     }
-}
 
-impl PipelineRenderingCreateInfo {
     pub(crate) fn from_subpass(subpass: &Subpass) -> Self {
         let subpass_desc = subpass.subpass_desc();
         let rp_attachments = subpass.render_pass().attachments();
@@ -345,7 +352,7 @@ impl PipelineRenderingCreateInfo {
     pub(crate) fn to_vk<'a>(
         &self,
         fields1_vk: &'a PipelineRenderingCreateInfoFields1Vk,
-    ) -> ash::vk::PipelineRenderingCreateInfo<'a> {
+    ) -> vk::PipelineRenderingCreateInfo<'a> {
         let &Self {
             view_mask,
             color_attachment_formats: _,
@@ -357,14 +364,14 @@ impl PipelineRenderingCreateInfo {
             color_attachment_formats_vk,
         } = fields1_vk;
 
-        ash::vk::PipelineRenderingCreateInfo::default()
+        vk::PipelineRenderingCreateInfo::default()
             .view_mask(view_mask)
             .color_attachment_formats(color_attachment_formats_vk)
             .depth_attachment_format(
-                depth_attachment_format.map_or(ash::vk::Format::UNDEFINED, Into::into),
+                depth_attachment_format.map_or(vk::Format::UNDEFINED, Into::into),
             )
             .stencil_attachment_format(
-                stencil_attachment_format.map_or(ash::vk::Format::UNDEFINED, Into::into),
+                stencil_attachment_format.map_or(vk::Format::UNDEFINED, Into::into),
             )
     }
 
@@ -372,7 +379,7 @@ impl PipelineRenderingCreateInfo {
         let color_attachment_formats_vk = self
             .color_attachment_formats
             .iter()
-            .map(|format| format.map_or(ash::vk::Format::UNDEFINED, Into::into))
+            .map(|format| format.map_or(vk::Format::UNDEFINED, Into::into))
             .collect();
 
         PipelineRenderingCreateInfoFields1Vk {
@@ -382,5 +389,5 @@ impl PipelineRenderingCreateInfo {
 }
 
 pub(crate) struct PipelineRenderingCreateInfoFields1Vk {
-    pub(crate) color_attachment_formats_vk: SmallVec<[ash::vk::Format; 4]>,
+    pub(crate) color_attachment_formats_vk: SmallVec<[vk::Format; 4]>,
 }

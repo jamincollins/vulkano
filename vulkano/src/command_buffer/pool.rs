@@ -14,8 +14,9 @@ use crate::{
     Requires, RequiresAllOf, RequiresOneOf, Validated, ValidationError, Version, VulkanError,
     VulkanObject,
 };
+use ash::vk;
 use smallvec::SmallVec;
-use std::{cell::Cell, marker::PhantomData, mem::MaybeUninit, num::NonZeroU64, ptr, sync::Arc};
+use std::{cell::Cell, marker::PhantomData, mem::MaybeUninit, num::NonZero, ptr, sync::Arc};
 
 /// Represents a Vulkan command pool.
 ///
@@ -26,15 +27,15 @@ use std::{cell::Cell, marker::PhantomData, mem::MaybeUninit, num::NonZeroU64, pt
 /// safe. In other words, you can only use a pool from one thread at a time.
 #[derive(Debug)]
 pub struct CommandPool {
-    handle: ash::vk::CommandPool,
+    handle: vk::CommandPool,
     device: InstanceOwnedDebugWrapper<Arc<Device>>,
-    id: NonZeroU64,
+    id: NonZero<u64>,
 
     flags: CommandPoolCreateFlags,
     queue_family_index: u32,
 
     // Unimplement `Sync`, as Vulkan command pools are not thread-safe.
-    _marker: PhantomData<Cell<ash::vk::CommandPool>>,
+    _marker: PhantomData<Cell<vk::CommandPool>>,
 }
 
 impl CommandPool {
@@ -69,18 +70,20 @@ impl CommandPool {
         let handle = {
             let fns = device.fns();
             let mut output = MaybeUninit::uninit();
-            (fns.v1_0.create_command_pool)(
-                device.handle(),
-                &create_info_vk,
-                ptr::null(),
-                output.as_mut_ptr(),
-            )
+            unsafe {
+                (fns.v1_0.create_command_pool)(
+                    device.handle(),
+                    &create_info_vk,
+                    ptr::null(),
+                    output.as_mut_ptr(),
+                )
+            }
             .result()
             .map_err(VulkanError::from)?;
-            output.assume_init()
+            unsafe { output.assume_init() }
         };
 
-        Ok(Self::from_handle(device, handle, create_info))
+        Ok(unsafe { Self::from_handle(device, handle, create_info) })
     }
 
     /// Creates a new `CommandPool` from a raw object handle.
@@ -92,7 +95,7 @@ impl CommandPool {
     #[inline]
     pub unsafe fn from_handle(
         device: Arc<Device>,
-        handle: ash::vk::CommandPool,
+        handle: vk::CommandPool,
         create_info: CommandPoolCreateInfo,
     ) -> CommandPool {
         let CommandPoolCreateInfo {
@@ -134,7 +137,7 @@ impl CommandPool {
     pub unsafe fn reset(&self, flags: CommandPoolResetFlags) -> Result<(), Validated<VulkanError>> {
         self.validate_reset(flags)?;
 
-        Ok(self.reset_unchecked(flags)?)
+        Ok(unsafe { self.reset_unchecked(flags) }?)
     }
 
     fn validate_reset(&self, flags: CommandPoolResetFlags) -> Result<(), Box<ValidationError>> {
@@ -149,7 +152,7 @@ impl CommandPool {
     #[cfg_attr(not(feature = "document_unchecked"), doc(hidden))]
     pub unsafe fn reset_unchecked(&self, flags: CommandPoolResetFlags) -> Result<(), VulkanError> {
         let fns = self.device.fns();
-        (fns.v1_0.reset_command_pool)(self.device.handle(), self.handle, flags.into())
+        unsafe { (fns.v1_0.reset_command_pool)(self.device.handle(), self.handle, flags.into()) }
             .result()
             .map_err(VulkanError::from)?;
 
@@ -215,7 +218,7 @@ impl CommandPool {
         let command_buffers: SmallVec<[_; 4]> = command_buffers.into_iter().collect();
         self.validate_free_command_buffers(&command_buffers)?;
 
-        self.free_command_buffers_unchecked(command_buffers);
+        unsafe { self.free_command_buffers_unchecked(command_buffers) };
         Ok(())
     }
 
@@ -239,12 +242,14 @@ impl CommandPool {
             command_buffers.into_iter().map(|cb| cb.handle).collect();
 
         let fns = self.device.fns();
-        (fns.v1_0.free_command_buffers)(
-            self.device.handle(),
-            self.handle,
-            command_buffers_vk.len() as u32,
-            command_buffers_vk.as_ptr(),
-        )
+        unsafe {
+            (fns.v1_0.free_command_buffers)(
+                self.device.handle(),
+                self.handle,
+                command_buffers_vk.len() as u32,
+                command_buffers_vk.as_ptr(),
+            )
+        }
     }
 
     /// Trims a command pool, which recycles unused internal memory from the command pool back to
@@ -286,17 +291,21 @@ impl CommandPool {
         let fns = self.device.fns();
 
         if self.device.api_version() >= Version::V1_1 {
-            (fns.v1_1.trim_command_pool)(
-                self.device.handle(),
-                self.handle,
-                ash::vk::CommandPoolTrimFlags::empty(),
-            );
+            unsafe {
+                (fns.v1_1.trim_command_pool)(
+                    self.device.handle(),
+                    self.handle,
+                    vk::CommandPoolTrimFlags::empty(),
+                )
+            };
         } else {
-            (fns.khr_maintenance1.trim_command_pool_khr)(
-                self.device.handle(),
-                self.handle,
-                ash::vk::CommandPoolTrimFlagsKHR::empty(),
-            );
+            unsafe {
+                (fns.khr_maintenance1.trim_command_pool_khr)(
+                    self.device.handle(),
+                    self.handle,
+                    vk::CommandPoolTrimFlagsKHR::empty(),
+                )
+            };
         }
     }
 }
@@ -310,7 +319,7 @@ impl Drop for CommandPool {
 }
 
 unsafe impl VulkanObject for CommandPool {
-    type Handle = ash::vk::CommandPool;
+    type Handle = vk::CommandPool;
 
     #[inline]
     fn handle(&self) -> Self::Handle {
@@ -347,15 +356,21 @@ pub struct CommandPoolCreateInfo {
 impl Default for CommandPoolCreateInfo {
     #[inline]
     fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CommandPoolCreateInfo {
+    /// Returns a default `CommandPoolCreateInfo`.
+    #[inline]
+    pub const fn new() -> Self {
         Self {
             flags: CommandPoolCreateFlags::empty(),
             queue_family_index: u32::MAX,
             _ne: crate::NonExhaustive(()),
         }
     }
-}
 
-impl CommandPoolCreateInfo {
     pub(crate) fn validate(&self, device: &Device) -> Result<(), Box<ValidationError>> {
         let &Self {
             flags,
@@ -381,14 +396,14 @@ impl CommandPoolCreateInfo {
         Ok(())
     }
 
-    pub(crate) fn to_vk(&self) -> ash::vk::CommandPoolCreateInfo<'static> {
+    pub(crate) fn to_vk(&self) -> vk::CommandPoolCreateInfo<'static> {
         let &Self {
             flags,
             queue_family_index,
             _ne: _,
         } = self;
 
-        ash::vk::CommandPoolCreateInfo::default()
+        vk::CommandPoolCreateInfo::default()
             .flags(flags.into())
             .queue_family_index(queue_family_index)
     }
@@ -445,15 +460,15 @@ pub struct CommandBufferAllocateInfo {
 impl CommandBufferAllocateInfo {
     pub(crate) fn to_vk(
         &self,
-        command_pool_vk: ash::vk::CommandPool,
-    ) -> ash::vk::CommandBufferAllocateInfo<'static> {
+        command_pool_vk: vk::CommandPool,
+    ) -> vk::CommandBufferAllocateInfo<'static> {
         let &Self {
             level,
             command_buffer_count,
             _ne: _,
         } = self;
 
-        ash::vk::CommandBufferAllocateInfo::default()
+        vk::CommandBufferAllocateInfo::default()
             .command_pool(command_pool_vk)
             .level(level.into())
             .command_buffer_count(command_buffer_count)
@@ -463,6 +478,14 @@ impl CommandBufferAllocateInfo {
 impl Default for CommandBufferAllocateInfo {
     #[inline]
     fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CommandBufferAllocateInfo {
+    /// Returns a default `CommandBufferAllocateInfo`.
+    #[inline]
+    pub const fn new() -> Self {
         Self {
             level: CommandBufferLevel::Primary,
             command_buffer_count: 1,
@@ -474,9 +497,9 @@ impl Default for CommandBufferAllocateInfo {
 /// Opaque type that represents a command buffer allocated from a pool.
 #[derive(Debug)]
 pub struct CommandPoolAlloc {
-    handle: ash::vk::CommandBuffer,
+    handle: vk::CommandBuffer,
     device: InstanceOwnedDebugWrapper<Arc<Device>>,
-    id: NonZeroU64,
+    id: NonZero<u64>,
     level: CommandBufferLevel,
 }
 
@@ -489,7 +512,7 @@ impl CommandPoolAlloc {
 }
 
 unsafe impl VulkanObject for CommandPoolAlloc {
-    type Handle = ash::vk::CommandBuffer;
+    type Handle = vk::CommandBuffer;
 
     #[inline]
     fn handle(&self) -> Self::Handle {

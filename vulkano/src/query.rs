@@ -12,9 +12,10 @@ use crate::{
     DeviceSize, Requires, RequiresAllOf, RequiresOneOf, Validated, ValidationError, Version,
     VulkanError, VulkanObject,
 };
+use ash::vk;
 use std::{
     mem::{size_of_val, MaybeUninit},
-    num::NonZeroU64,
+    num::NonZero,
     ops::Range,
     ptr,
     sync::Arc,
@@ -23,9 +24,9 @@ use std::{
 /// A collection of one or more queries of a particular type.
 #[derive(Debug)]
 pub struct QueryPool {
-    handle: ash::vk::QueryPool,
+    handle: vk::QueryPool,
     device: InstanceOwnedDebugWrapper<Arc<Device>>,
-    id: NonZeroU64,
+    id: NonZero<u64>,
 
     query_type: QueryType,
     query_count: u32,
@@ -78,7 +79,7 @@ impl QueryPool {
             unsafe { output.assume_init() }
         };
 
-        Ok(Self::from_handle(device, handle, create_info))
+        Ok(unsafe { Self::from_handle(device, handle, create_info) })
     }
 
     /// Creates a new `QueryPool` from a raw object handle.
@@ -90,7 +91,7 @@ impl QueryPool {
     #[inline]
     pub unsafe fn from_handle(
         device: Arc<Device>,
-        handle: ash::vk::QueryPool,
+        handle: vk::QueryPool,
         create_info: QueryPoolCreateInfo,
     ) -> Arc<QueryPool> {
         let QueryPoolCreateInfo {
@@ -264,7 +265,7 @@ impl QueryPool {
         T: QueryResultElement,
     {
         let per_query_len = self.result_len(flags);
-        let stride = per_query_len * std::mem::size_of::<T>() as DeviceSize;
+        let stride = per_query_len * size_of::<T>() as DeviceSize;
 
         let fns = self.device.fns();
         let result = unsafe {
@@ -276,13 +277,13 @@ impl QueryPool {
                 size_of_val(destination),
                 destination.as_mut_ptr().cast(),
                 stride,
-                ash::vk::QueryResultFlags::from(flags) | T::FLAG,
+                vk::QueryResultFlags::from(flags) | T::FLAG,
             )
         };
 
         match result {
-            ash::vk::Result::SUCCESS => Ok(true),
-            ash::vk::Result::NOT_READY => Ok(false),
+            vk::Result::SUCCESS => Ok(true),
+            vk::Result::NOT_READY => Ok(false),
             err => Err(VulkanError::from(err)),
         }
     }
@@ -351,20 +352,24 @@ impl QueryPool {
         let fns = self.device.fns();
 
         if self.device.api_version() >= Version::V1_2 {
-            (fns.v1_2.reset_query_pool)(
-                self.device.handle(),
-                self.handle(),
-                range.start,
-                range.len() as u32,
-            );
+            unsafe {
+                (fns.v1_2.reset_query_pool)(
+                    self.device.handle(),
+                    self.handle(),
+                    range.start,
+                    range.len() as u32,
+                )
+            };
         } else {
             debug_assert!(self.device.enabled_extensions().ext_host_query_reset);
-            (fns.ext_host_query_reset.reset_query_pool_ext)(
-                self.device.handle(),
-                self.handle(),
-                range.start,
-                range.len() as u32,
-            );
+            unsafe {
+                (fns.ext_host_query_reset.reset_query_pool_ext)(
+                    self.device.handle(),
+                    self.handle(),
+                    range.start,
+                    range.len() as u32,
+                )
+            };
         }
     }
 }
@@ -378,7 +383,7 @@ impl Drop for QueryPool {
 }
 
 unsafe impl VulkanObject for QueryPool {
-    type Handle = ash::vk::QueryPool;
+    type Handle = vk::QueryPool;
 
     #[inline]
     fn handle(&self) -> Self::Handle {
@@ -419,15 +424,21 @@ pub struct QueryPoolCreateInfo {
 }
 
 impl QueryPoolCreateInfo {
-    /// Returns a `QueryPoolCreateInfo` with the specified `query_type`.
+    /// Returns a default `QueryPoolCreateInfo` with the provided `query_type`.
     #[inline]
-    pub fn query_type(query_type: QueryType) -> Self {
+    pub const fn new(query_type: QueryType) -> Self {
         Self {
             query_type,
             query_count: 0,
             pipeline_statistics: QueryPipelineStatisticFlags::empty(),
             _ne: crate::NonExhaustive(()),
         }
+    }
+
+    #[deprecated(since = "0.36.0", note = "use `new` instead")]
+    #[inline]
+    pub fn query_type(query_type: QueryType) -> Self {
+        Self::new(query_type)
     }
 
     pub(crate) fn validate(&self, device: &Device) -> Result<(), Box<ValidationError>> {
@@ -510,7 +521,7 @@ impl QueryPoolCreateInfo {
         Ok(())
     }
 
-    pub(crate) fn to_vk(&self) -> ash::vk::QueryPoolCreateInfo<'static> {
+    pub(crate) fn to_vk(&self) -> vk::QueryPoolCreateInfo<'static> {
         let &Self {
             query_type,
             query_count,
@@ -518,8 +529,8 @@ impl QueryPoolCreateInfo {
             _ne: _,
         } = self;
 
-        ash::vk::QueryPoolCreateInfo::default()
-            .flags(ash::vk::QueryPoolCreateFlags::empty())
+        vk::QueryPoolCreateInfo::default()
+            .flags(vk::QueryPoolCreateFlags::empty())
             .query_type(query_type.into())
             .query_count(query_count)
             .pipeline_statistics(pipeline_statistics.into())
@@ -726,15 +737,15 @@ vulkan_bitflags! {
 /// This is implemented for `u32` and `u64`. Unless you really know what you're doing, you should
 /// not implement this trait for any other type.
 pub unsafe trait QueryResultElement: BufferContents + Sized {
-    const FLAG: ash::vk::QueryResultFlags;
+    const FLAG: vk::QueryResultFlags;
 }
 
 unsafe impl QueryResultElement for u32 {
-    const FLAG: ash::vk::QueryResultFlags = ash::vk::QueryResultFlags::empty();
+    const FLAG: vk::QueryResultFlags = vk::QueryResultFlags::empty();
 }
 
 unsafe impl QueryResultElement for u64 {
-    const FLAG: ash::vk::QueryResultFlags = ash::vk::QueryResultFlags::TYPE_64;
+    const FLAG: vk::QueryResultFlags = vk::QueryResultFlags::TYPE_64;
 }
 
 vulkan_bitflags! {
@@ -783,7 +794,7 @@ mod tests {
                 device,
                 QueryPoolCreateInfo {
                     query_count: 256,
-                    ..QueryPoolCreateInfo::query_type(QueryType::PipelineStatistics)
+                    ..QueryPoolCreateInfo::new(QueryType::PipelineStatistics)
                 },
             ),
             Err(Validated::ValidationError(_)),

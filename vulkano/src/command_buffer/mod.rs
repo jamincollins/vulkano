@@ -125,6 +125,7 @@ use crate::{
     device::{DeviceFeatures, DeviceProperties},
     pipeline::graphics::vertex_input::VertexInputRate,
 };
+use ash::vk;
 use bytemuck::{Pod, Zeroable};
 use foldhash::HashMap;
 use smallvec::SmallVec;
@@ -243,7 +244,7 @@ vulkan_enum! {
     SecondaryCommandBuffers = SECONDARY_COMMAND_BUFFERS,
 }
 
-impl From<SubpassContents> for ash::vk::RenderingFlags {
+impl From<SubpassContents> for vk::RenderingFlags {
     #[inline]
     fn from(val: SubpassContents) -> Self {
         match val {
@@ -306,6 +307,14 @@ pub struct CommandBufferInheritanceInfo {
 impl Default for CommandBufferInheritanceInfo {
     #[inline]
     fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CommandBufferInheritanceInfo {
+    /// Returns a default `CommandBufferInheritanceInfo`.
+    #[inline]
+    pub const fn new() -> Self {
         Self {
             render_pass: None,
             occlusion_query: None,
@@ -313,9 +322,7 @@ impl Default for CommandBufferInheritanceInfo {
             _ne: crate::NonExhaustive(()),
         }
     }
-}
 
-impl CommandBufferInheritanceInfo {
     pub(crate) fn validate(&self, device: &Device) -> Result<(), Box<ValidationError>> {
         let &Self {
             ref render_pass,
@@ -396,7 +403,7 @@ impl CommandBufferInheritanceInfo {
     pub(crate) fn to_vk<'a>(
         &self,
         extensions_vk: &'a mut CommandBufferInheritanceInfoExtensionsVk<'_>,
-    ) -> ash::vk::CommandBufferInheritanceInfo<'a> {
+    ) -> vk::CommandBufferInheritanceInfo<'a> {
         let &Self {
             ref render_pass,
             occlusion_query,
@@ -430,7 +437,7 @@ impl CommandBufferInheritanceInfo {
             .map(|flags| (true, flags.into()))
             .unwrap_or_default();
 
-        let mut val_vk = ash::vk::CommandBufferInheritanceInfo::default()
+        let mut val_vk = vk::CommandBufferInheritanceInfo::default()
             .render_pass(render_pass_vk)
             .subpass(subpass_vk)
             .framebuffer(framebuffer_vk)
@@ -491,7 +498,7 @@ impl CommandBufferInheritanceInfo {
 }
 
 pub(crate) struct CommandBufferInheritanceInfoExtensionsVk<'a> {
-    pub(crate) rendering_info_vk: Option<ash::vk::CommandBufferInheritanceRenderingInfo<'a>>,
+    pub(crate) rendering_info_vk: Option<vk::CommandBufferInheritanceRenderingInfo<'a>>,
 }
 
 pub(crate) struct CommandBufferInheritanceInfoFields1Vk {
@@ -547,13 +554,19 @@ pub struct CommandBufferInheritanceRenderPassInfo {
 }
 
 impl CommandBufferInheritanceRenderPassInfo {
-    /// Returns a `CommandBufferInheritanceRenderPassInfo` with the specified `subpass`.
+    /// Returns a default `CommandBufferInheritanceRenderPassInfo` with the provided `subpass`.
     #[inline]
-    pub fn subpass(subpass: Subpass) -> Self {
+    pub const fn new(subpass: Subpass) -> Self {
         Self {
             subpass,
             framebuffer: None,
         }
+    }
+
+    #[deprecated(since = "0.36.0", note = "use `new` instead")]
+    #[inline]
+    pub fn subpass(subpass: Subpass) -> Self {
+        Self::new(subpass)
     }
 
     pub(crate) fn validate(&self, device: &Device) -> Result<(), Box<ValidationError>> {
@@ -642,6 +655,14 @@ pub struct CommandBufferInheritanceRenderingInfo {
 impl Default for CommandBufferInheritanceRenderingInfo {
     #[inline]
     fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CommandBufferInheritanceRenderingInfo {
+    /// Returns a default `CommandBufferInheritanceRenderingInfo`.
+    #[inline]
+    pub const fn new() -> Self {
         Self {
             view_mask: 0,
             color_attachment_formats: Vec::new(),
@@ -650,9 +671,7 @@ impl Default for CommandBufferInheritanceRenderingInfo {
             rasterization_samples: SampleCount::Sample1,
         }
     }
-}
 
-impl CommandBufferInheritanceRenderingInfo {
     pub(crate) fn validate(&self, device: &Device) -> Result<(), Box<ValidationError>> {
         let &Self {
             view_mask,
@@ -838,7 +857,7 @@ impl CommandBufferInheritanceRenderingInfo {
     pub(crate) fn to_vk<'a>(
         &self,
         fields1_vk: &'a CommandBufferInheritanceRenderingInfoFields1Vk,
-    ) -> ash::vk::CommandBufferInheritanceRenderingInfo<'a> {
+    ) -> vk::CommandBufferInheritanceRenderingInfo<'a> {
         let &Self {
             view_mask,
             color_attachment_formats: _,
@@ -850,15 +869,15 @@ impl CommandBufferInheritanceRenderingInfo {
             color_attachment_formats_vk,
         } = fields1_vk;
 
-        ash::vk::CommandBufferInheritanceRenderingInfo::default()
-            .flags(ash::vk::RenderingFlags::empty())
+        vk::CommandBufferInheritanceRenderingInfo::default()
+            .flags(vk::RenderingFlags::empty())
             .view_mask(view_mask)
             .color_attachment_formats(color_attachment_formats_vk)
             .depth_attachment_format(
-                depth_attachment_format.map_or(ash::vk::Format::UNDEFINED, Into::into),
+                depth_attachment_format.map_or(vk::Format::UNDEFINED, Into::into),
             )
             .stencil_attachment_format(
-                stencil_attachment_format.map_or(ash::vk::Format::UNDEFINED, Into::into),
+                stencil_attachment_format.map_or(vk::Format::UNDEFINED, Into::into),
             )
             .rasterization_samples(rasterization_samples.into())
     }
@@ -871,7 +890,7 @@ impl CommandBufferInheritanceRenderingInfo {
 
         let color_attachment_formats_vk = color_attachment_formats
             .iter()
-            .map(|format| format.map_or(ash::vk::Format::UNDEFINED, Into::into))
+            .map(|format| format.map_or(vk::Format::UNDEFINED, Into::into))
             .collect();
 
         CommandBufferInheritanceRenderingInfoFields1Vk {
@@ -881,7 +900,7 @@ impl CommandBufferInheritanceRenderingInfo {
 }
 
 pub(crate) struct CommandBufferInheritanceRenderingInfoFields1Vk {
-    pub(crate) color_attachment_formats_vk: SmallVec<[ash::vk::Format; 4]>,
+    pub(crate) color_attachment_formats_vk: SmallVec<[vk::Format; 4]>,
 }
 
 /// Usage flags to pass when creating a command buffer.
@@ -894,7 +913,7 @@ pub enum CommandBufferUsage {
     /// The command buffer can only be submitted once before being destroyed. Any further submit is
     /// forbidden. This makes it possible for the implementation to perform additional
     /// optimizations.
-    OneTimeSubmit = ash::vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT.as_raw(),
+    OneTimeSubmit = vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT.as_raw(),
 
     /// The command buffer can be used multiple times, but must not execute or record more than
     /// once simultaneously. In other words, it is as if executing the command buffer borrows
@@ -904,10 +923,10 @@ pub enum CommandBufferUsage {
     /// The command buffer can be executed multiple times in parallel on different queues.
     /// If it's a secondary command buffer, it can be recorded to multiple primary command buffers
     /// at once.
-    SimultaneousUse = ash::vk::CommandBufferUsageFlags::SIMULTANEOUS_USE.as_raw(),
+    SimultaneousUse = vk::CommandBufferUsageFlags::SIMULTANEOUS_USE.as_raw(),
 }
 
-impl From<CommandBufferUsage> for ash::vk::CommandBufferUsageFlags {
+impl From<CommandBufferUsage> for vk::CommandBufferUsageFlags {
     #[inline]
     fn from(val: CommandBufferUsage) -> Self {
         Self::from_raw(val as u32)
@@ -940,6 +959,14 @@ pub struct SubmitInfo {
 impl Default for SubmitInfo {
     #[inline]
     fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SubmitInfo {
+    /// Returns a default `SubmitInfo`.
+    #[inline]
+    pub const fn new() -> Self {
         Self {
             wait_semaphores: Vec::new(),
             command_buffers: Vec::new(),
@@ -947,9 +974,7 @@ impl Default for SubmitInfo {
             _ne: crate::NonExhaustive(()),
         }
     }
-}
 
-impl SubmitInfo {
     pub(crate) fn validate(&self, device: &Device) -> Result<(), Box<ValidationError>> {
         let &Self {
             ref wait_semaphores,
@@ -1003,18 +1028,15 @@ impl SubmitInfo {
         Ok(())
     }
 
-    pub(crate) fn to_vk2<'a>(
-        &self,
-        fields1_vk: &'a SubmitInfo2Fields1Vk,
-    ) -> ash::vk::SubmitInfo2<'a> {
+    pub(crate) fn to_vk2<'a>(&self, fields1_vk: &'a SubmitInfo2Fields1Vk) -> vk::SubmitInfo2<'a> {
         let SubmitInfo2Fields1Vk {
             wait_semaphore_infos_vk,
             command_buffer_infos_vk,
             signal_semaphore_infos_vk,
         } = fields1_vk;
 
-        ash::vk::SubmitInfo2::default()
-            .flags(ash::vk::SubmitFlags::empty()) // TODO:
+        vk::SubmitInfo2::default()
+            .flags(vk::SubmitFlags::empty()) // TODO:
             .wait_semaphore_infos(wait_semaphore_infos_vk)
             .command_buffer_infos(command_buffer_infos_vk)
             .signal_semaphore_infos(signal_semaphore_infos_vk)
@@ -1048,7 +1070,7 @@ impl SubmitInfo {
         &self,
         fields1_vk: &'a SubmitInfoFields1Vk,
         extensions_vk: &'a mut SubmitInfoExtensionsVk<'_>,
-    ) -> ash::vk::SubmitInfo<'a> {
+    ) -> vk::SubmitInfo<'a> {
         let SubmitInfoFields1Vk {
             wait_semaphores_vk,
             wait_dst_stage_mask_vk,
@@ -1058,7 +1080,7 @@ impl SubmitInfo {
             signal_semaphore_values_vk: _,
         } = fields1_vk;
 
-        let mut val_vk = ash::vk::SubmitInfo::default()
+        let mut val_vk = vk::SubmitInfo::default()
             .wait_semaphores(wait_semaphores_vk)
             .wait_dst_stage_mask(wait_dst_stage_mask_vk)
             .command_buffers(command_buffers_vk)
@@ -1100,7 +1122,7 @@ impl SubmitInfo {
                 semaphore_submit_info.semaphore.semaphore_type() == SemaphoreType::Timeline
             })
             .then(|| {
-                ash::vk::TimelineSemaphoreSubmitInfo::default()
+                vk::TimelineSemaphoreSubmitInfo::default()
                     .wait_semaphore_values(wait_semaphore_values_vk)
                     .signal_semaphore_values(signal_semaphore_values_vk)
             });
@@ -1167,21 +1189,21 @@ impl SubmitInfo {
 }
 
 pub(crate) struct SubmitInfo2Fields1Vk {
-    pub(crate) wait_semaphore_infos_vk: SmallVec<[ash::vk::SemaphoreSubmitInfo<'static>; 4]>,
-    pub(crate) command_buffer_infos_vk: SmallVec<[ash::vk::CommandBufferSubmitInfo<'static>; 4]>,
-    pub(crate) signal_semaphore_infos_vk: SmallVec<[ash::vk::SemaphoreSubmitInfo<'static>; 4]>,
+    pub(crate) wait_semaphore_infos_vk: SmallVec<[vk::SemaphoreSubmitInfo<'static>; 4]>,
+    pub(crate) command_buffer_infos_vk: SmallVec<[vk::CommandBufferSubmitInfo<'static>; 4]>,
+    pub(crate) signal_semaphore_infos_vk: SmallVec<[vk::SemaphoreSubmitInfo<'static>; 4]>,
 }
 
 pub(crate) struct SubmitInfoExtensionsVk<'a> {
-    pub(crate) timeline_semaphore_vk: Option<ash::vk::TimelineSemaphoreSubmitInfo<'a>>,
+    pub(crate) timeline_semaphore_vk: Option<vk::TimelineSemaphoreSubmitInfo<'a>>,
 }
 
 pub(crate) struct SubmitInfoFields1Vk {
-    pub(crate) wait_semaphores_vk: SmallVec<[ash::vk::Semaphore; 4]>,
-    pub(crate) wait_dst_stage_mask_vk: SmallVec<[ash::vk::PipelineStageFlags; 4]>,
+    pub(crate) wait_semaphores_vk: SmallVec<[vk::Semaphore; 4]>,
+    pub(crate) wait_dst_stage_mask_vk: SmallVec<[vk::PipelineStageFlags; 4]>,
     pub(crate) wait_semaphore_values_vk: SmallVec<[u64; 4]>,
-    pub(crate) command_buffers_vk: SmallVec<[ash::vk::CommandBuffer; 4]>,
-    pub(crate) signal_semaphores_vk: SmallVec<[ash::vk::Semaphore; 4]>,
+    pub(crate) command_buffers_vk: SmallVec<[vk::CommandBuffer; 4]>,
+    pub(crate) signal_semaphores_vk: SmallVec<[vk::Semaphore; 4]>,
     pub(crate) signal_semaphore_values_vk: SmallVec<[u64; 4]>,
 }
 
@@ -1197,9 +1219,9 @@ pub struct CommandBufferSubmitInfo {
 }
 
 impl CommandBufferSubmitInfo {
-    /// Returns a `CommandBufferSubmitInfo` with the specified `command_buffer`.
+    /// Returns a default `CommandBufferSubmitInfo` with the provided `command_buffer`.
     #[inline]
-    pub fn new(command_buffer: Arc<dyn PrimaryCommandBufferAbstract>) -> Self {
+    pub const fn new(command_buffer: Arc<dyn PrimaryCommandBufferAbstract>) -> Self {
         Self {
             command_buffer,
             _ne: crate::NonExhaustive(()),
@@ -1218,18 +1240,18 @@ impl CommandBufferSubmitInfo {
         Ok(())
     }
 
-    pub(crate) fn to_vk2(&self) -> ash::vk::CommandBufferSubmitInfo<'static> {
+    pub(crate) fn to_vk2(&self) -> vk::CommandBufferSubmitInfo<'static> {
         let &Self {
             ref command_buffer,
             _ne: _,
         } = self;
 
-        ash::vk::CommandBufferSubmitInfo::default()
+        vk::CommandBufferSubmitInfo::default()
             .command_buffer(command_buffer.handle())
             .device_mask(0) // TODO:
     }
 
-    pub(crate) fn to_vk(&self) -> ash::vk::CommandBuffer {
+    pub(crate) fn to_vk(&self) -> vk::CommandBuffer {
         let &Self {
             ref command_buffer,
             _ne: _,
@@ -1279,9 +1301,9 @@ pub struct SemaphoreSubmitInfo {
 }
 
 impl SemaphoreSubmitInfo {
-    /// Returns a `SemaphoreSubmitInfo` with the specified `semaphore`.
+    /// Returns a default `SemaphoreSubmitInfo` with the provided `semaphore`.
     #[inline]
-    pub fn new(semaphore: Arc<Semaphore>) -> Self {
+    pub const fn new(semaphore: Arc<Semaphore>) -> Self {
         Self {
             semaphore,
             value: 0,
@@ -1483,7 +1505,7 @@ impl SemaphoreSubmitInfo {
         Ok(())
     }
 
-    pub(crate) fn to_vk2(&self) -> ash::vk::SemaphoreSubmitInfo<'static> {
+    pub(crate) fn to_vk2(&self) -> vk::SemaphoreSubmitInfo<'static> {
         let &Self {
             ref semaphore,
             value,
@@ -1491,7 +1513,7 @@ impl SemaphoreSubmitInfo {
             _ne: _,
         } = self;
 
-        ash::vk::SemaphoreSubmitInfo::default()
+        vk::SemaphoreSubmitInfo::default()
             .semaphore(semaphore.handle())
             .value(value)
             .stage_mask(stages.into())

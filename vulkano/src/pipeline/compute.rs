@@ -25,8 +25,9 @@ use crate::{
     shader::{spirv::ExecutionModel, DescriptorBindingRequirements},
     Validated, ValidationError, VulkanError, VulkanObject,
 };
+use ash::vk;
 use foldhash::HashMap;
-use std::{fmt::Debug, mem::MaybeUninit, num::NonZeroU64, ptr, sync::Arc};
+use std::{fmt::Debug, mem::MaybeUninit, num::NonZero, ptr, sync::Arc};
 
 /// A pipeline object that describes to the Vulkan implementation how it should perform compute
 /// operations.
@@ -38,9 +39,9 @@ use std::{fmt::Debug, mem::MaybeUninit, num::NonZeroU64, ptr, sync::Arc};
 /// Check the documentation of the `PipelineCache` for more information.
 #[derive(Debug)]
 pub struct ComputePipeline {
-    handle: ash::vk::Pipeline,
+    handle: vk::Pipeline,
     device: InstanceOwnedDebugWrapper<Arc<Device>>,
-    id: NonZeroU64,
+    id: NonZero<u64>,
 
     flags: PipelineCreateFlags,
     layout: DeviceOwnedDebugWrapper<Arc<PipelineLayout>>,
@@ -92,20 +93,22 @@ impl ComputePipeline {
         let handle = {
             let fns = device.fns();
             let mut output = MaybeUninit::uninit();
-            (fns.v1_0.create_compute_pipelines)(
-                device.handle(),
-                cache.as_ref().map_or_else(Default::default, |c| c.handle()),
-                1,
-                &create_info_vk,
-                ptr::null(),
-                output.as_mut_ptr(),
-            )
+            unsafe {
+                (fns.v1_0.create_compute_pipelines)(
+                    device.handle(),
+                    cache.as_ref().map_or_else(Default::default, |c| c.handle()),
+                    1,
+                    &create_info_vk,
+                    ptr::null(),
+                    output.as_mut_ptr(),
+                )
+            }
             .result()
             .map_err(VulkanError::from)?;
-            output.assume_init()
+            unsafe { output.assume_init() }
         };
 
-        Ok(Self::from_handle(device, handle, create_info))
+        Ok(unsafe { Self::from_handle(device, handle, create_info) })
     }
 
     /// Creates a new `ComputePipeline` from a raw object handle.
@@ -117,7 +120,7 @@ impl ComputePipeline {
     #[inline]
     pub unsafe fn from_handle(
         device: Arc<Device>,
-        handle: ash::vk::Pipeline,
+        handle: vk::Pipeline,
         create_info: ComputePipelineCreateInfo,
     ) -> Arc<ComputePipeline> {
         let ComputePipelineCreateInfo {
@@ -195,7 +198,7 @@ impl Pipeline for ComputePipeline {
 impl_id_counter!(ComputePipeline);
 
 unsafe impl VulkanObject for ComputePipeline {
-    type Handle = ash::vk::Pipeline;
+    type Handle = vk::Pipeline;
 
     #[inline]
     fn handle(&self) -> Self::Handle {
@@ -249,9 +252,9 @@ pub struct ComputePipelineCreateInfo {
 }
 
 impl ComputePipelineCreateInfo {
-    /// Returns a `ComputePipelineCreateInfo` with the specified `stage` and `layout`.
+    /// Returns a default `ComputePipelineCreateInfo` with the provided `stage` and `layout`.
     #[inline]
-    pub fn stage_layout(stage: PipelineShaderStageCreateInfo, layout: Arc<PipelineLayout>) -> Self {
+    pub const fn new(stage: PipelineShaderStageCreateInfo, layout: Arc<PipelineLayout>) -> Self {
         Self {
             flags: PipelineCreateFlags::empty(),
             stage,
@@ -259,6 +262,12 @@ impl ComputePipelineCreateInfo {
             base_pipeline: None,
             _ne: crate::NonExhaustive(()),
         }
+    }
+
+    #[deprecated(since = "0.36.0", note = "use `new` instead")]
+    #[inline]
+    pub fn stage_layout(stage: PipelineShaderStageCreateInfo, layout: Arc<PipelineLayout>) -> Self {
+        Self::new(stage, layout)
     }
 
     pub(crate) fn validate(&self, device: &Device) -> Result<(), Box<ValidationError>> {
@@ -310,12 +319,12 @@ impl ComputePipelineCreateInfo {
             }));
         }
 
-        let &PipelineShaderStageCreateInfo {
+        let PipelineShaderStageCreateInfo {
             flags: _,
-            ref entry_point,
-            required_subgroup_size: _vk,
+            entry_point,
+            required_subgroup_size: _,
             _ne: _,
-        } = &stage;
+        } = stage;
 
         let entry_point_info = entry_point.info();
 
@@ -361,7 +370,7 @@ impl ComputePipelineCreateInfo {
         &self,
         fields1_vk: &'a ComputePipelineCreateInfoFields1Vk<'_>,
         extensions_vk: &'a mut ComputePipelineCreateInfoExtensionsVk,
-    ) -> ash::vk::ComputePipelineCreateInfo<'a> {
+    ) -> vk::ComputePipelineCreateInfo<'a> {
         let &Self {
             flags,
             ref stage,
@@ -376,14 +385,14 @@ impl ComputePipelineCreateInfo {
 
         let stage_vk = stage.to_vk(stage_fields1_vk, stage_extensions_vk);
 
-        ash::vk::ComputePipelineCreateInfo::default()
+        vk::ComputePipelineCreateInfo::default()
             .flags(flags.into())
             .stage(stage_vk)
             .layout(layout.handle())
             .base_pipeline_handle(
                 base_pipeline
                     .as_ref()
-                    .map_or(ash::vk::Pipeline::null(), VulkanObject::handle),
+                    .map_or(vk::Pipeline::null(), VulkanObject::handle),
             )
             .base_pipeline_index(-1)
     }
@@ -506,7 +515,7 @@ mod tests {
             ComputePipeline::new(
                 device.clone(),
                 None,
-                ComputePipelineCreateInfo::stage_layout(stage, layout),
+                ComputePipelineCreateInfo::new(stage, layout),
             )
             .unwrap()
         };
@@ -611,7 +620,7 @@ mod tests {
             }
             */
             const MODULE: [u32; 246] = [
-                119734787, 65536, 851978, 30, 0, 131089, 1, 131089, 61, 393227, 1, 1280527431,
+                119734787, 66304, 851979, 30, 0, 131089, 1, 131089, 61, 393227, 1, 1280527431,
                 1685353262, 808793134, 0, 196622, 0, 1, 458767, 5, 4, 1852399981, 0, 9, 23, 393232,
                 4, 17, 128, 1, 1, 196611, 2, 450, 655364, 1197427783, 1279741775, 1885560645,
                 1953718128, 1600482425, 1701734764, 1919509599, 1769235301, 25974, 524292,
@@ -621,11 +630,11 @@ mod tests {
                 1986939244, 1952539503, 1231974249, 68, 262149, 18, 1886680399, 29813, 327686, 18,
                 0, 1953067639, 101, 262149, 20, 1953067639, 101, 393221, 23, 1398762599,
                 1919378037, 1399879023, 6650473, 262215, 9, 11, 28, 327752, 18, 0, 35, 0, 196679,
-                18, 3, 262215, 20, 34, 0, 262215, 20, 33, 0, 196679, 23, 0, 262215, 23, 11, 36,
+                18, 2, 262215, 20, 34, 0, 262215, 20, 33, 0, 196679, 23, 0, 262215, 23, 11, 36,
                 196679, 24, 0, 262215, 29, 11, 25, 131091, 2, 196641, 3, 2, 262165, 6, 32, 0,
                 262167, 7, 6, 3, 262176, 8, 1, 7, 262203, 8, 9, 1, 262187, 6, 10, 0, 262176, 11, 1,
-                6, 131092, 14, 196638, 18, 6, 262176, 19, 2, 18, 262203, 19, 20, 2, 262165, 21, 32,
-                1, 262187, 21, 22, 0, 262203, 11, 23, 1, 262176, 25, 2, 6, 262187, 6, 27, 128,
+                6, 131092, 14, 196638, 18, 6, 262176, 19, 12, 18, 262203, 19, 20, 12, 262165, 21,
+                32, 1, 262187, 21, 22, 0, 262203, 11, 23, 1, 262176, 25, 12, 6, 262187, 6, 27, 128,
                 262187, 6, 28, 1, 393260, 7, 29, 27, 28, 28, 327734, 2, 4, 0, 3, 131320, 5, 327745,
                 11, 12, 9, 10, 262205, 6, 13, 12, 327850, 14, 15, 13, 10, 196855, 17, 0, 262394,
                 15, 16, 17, 131320, 16, 262205, 6, 24, 23, 327745, 25, 26, 20, 22, 196670, 26, 24,
@@ -655,7 +664,7 @@ mod tests {
             ComputePipeline::new(
                 device.clone(),
                 None,
-                ComputePipelineCreateInfo::stage_layout(stage, layout),
+                ComputePipelineCreateInfo::new(stage, layout),
             )
             .unwrap()
         };

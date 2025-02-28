@@ -21,7 +21,8 @@ use crate::{
     macros::{impl_id_counter, vulkan_bitflags},
     Requires, RequiresAllOf, RequiresOneOf, Validated, ValidationError, VulkanError, VulkanObject,
 };
-use std::{mem::MaybeUninit, num::NonZeroU64, ptr, sync::Arc};
+use ash::vk;
+use std::{mem::MaybeUninit, num::NonZero, ptr, sync::Arc};
 
 /// Used to block the GPU execution until an event on the CPU occurs.
 ///
@@ -31,9 +32,9 @@ use std::{mem::MaybeUninit, num::NonZeroU64, ptr, sync::Arc};
 /// device loss.
 #[derive(Debug)]
 pub struct Event {
-    handle: ash::vk::Event,
+    handle: vk::Event,
     device: InstanceOwnedDebugWrapper<Arc<Device>>,
-    id: NonZeroU64,
+    id: NonZero<u64>,
     must_put_in_pool: bool,
 
     flags: EventCreateFlags,
@@ -102,7 +103,7 @@ impl Event {
             unsafe { output.assume_init() }
         };
 
-        Ok(Self::from_handle(device, handle, create_info))
+        Ok(unsafe { Self::from_handle(device, handle, create_info) })
     }
 
     /// Takes an event from the vulkano-provided event pool.
@@ -153,7 +154,7 @@ impl Event {
     #[inline]
     pub unsafe fn from_handle(
         device: Arc<Device>,
-        handle: ash::vk::Event,
+        handle: vk::Event,
         create_info: EventCreateInfo,
     ) -> Event {
         let EventCreateInfo { flags, _ne: _ } = create_info;
@@ -191,8 +192,8 @@ impl Event {
         let fns = self.device.fns();
         let result = unsafe { (fns.v1_0.get_event_status)(self.device.handle(), self.handle) };
         match result {
-            ash::vk::Result::EVENT_SET => Ok(true),
-            ash::vk::Result::EVENT_RESET => Ok(false),
+            vk::Result::EVENT_SET => Ok(true),
+            vk::Result::EVENT_RESET => Ok(false),
             err => Err(VulkanError::from(err)),
         }
     }
@@ -232,7 +233,7 @@ impl Event {
     pub unsafe fn reset(&mut self) -> Result<(), Validated<VulkanError>> {
         self.validate_reset()?;
 
-        Ok(self.reset_unchecked()?)
+        Ok(unsafe { self.reset_unchecked() }?)
     }
 
     fn validate_reset(&mut self) -> Result<(), Box<ValidationError>> {
@@ -268,7 +269,7 @@ impl Drop for Event {
 }
 
 unsafe impl VulkanObject for Event {
-    type Handle = ash::vk::Event;
+    type Handle = vk::Event;
 
     #[inline]
     fn handle(&self) -> Self::Handle {
@@ -299,14 +300,20 @@ pub struct EventCreateInfo {
 impl Default for EventCreateInfo {
     #[inline]
     fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl EventCreateInfo {
+    /// Returns a default `EventCreateInfo`.
+    #[inline]
+    pub const fn new() -> Self {
         Self {
             flags: EventCreateFlags::empty(),
             _ne: crate::NonExhaustive(()),
         }
     }
-}
 
-impl EventCreateInfo {
     pub(crate) fn validate(&self, device: &Device) -> Result<(), Box<ValidationError>> {
         let &Self { flags, _ne: _ } = self;
 
@@ -318,10 +325,10 @@ impl EventCreateInfo {
         Ok(())
     }
 
-    pub(crate) fn to_vk(&self) -> ash::vk::EventCreateInfo<'static> {
+    pub(crate) fn to_vk(&self) -> vk::EventCreateInfo<'static> {
         let &Self { flags, _ne: _ } = self;
 
-        ash::vk::EventCreateInfo::default().flags(flags.into())
+        vk::EventCreateInfo::default().flags(flags.into())
     }
 }
 

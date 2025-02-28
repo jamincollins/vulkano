@@ -67,6 +67,7 @@ use crate::{
     shader::{DescriptorBindingRequirements, ShaderStage, ShaderStages},
     Validated, ValidationError, VulkanError, VulkanObject,
 };
+use ash::vk;
 use foldhash::HashMap;
 use smallvec::SmallVec;
 use std::{
@@ -76,7 +77,7 @@ use std::{
     error::Error,
     fmt::{Display, Formatter, Write},
     mem::MaybeUninit,
-    num::NonZeroU64,
+    num::NonZero,
     ptr,
     sync::Arc,
 };
@@ -84,9 +85,9 @@ use std::{
 /// Describes the layout of descriptor sets and push constants that are made available to shaders.
 #[derive(Debug)]
 pub struct PipelineLayout {
-    handle: ash::vk::PipelineLayout,
+    handle: vk::PipelineLayout,
     device: InstanceOwnedDebugWrapper<Arc<Device>>,
-    id: NonZeroU64,
+    id: NonZero<u64>,
 
     flags: PipelineLayoutCreateFlags,
     set_layouts: Vec<DeviceOwnedDebugWrapper<Arc<DescriptorSetLayout>>>,
@@ -129,18 +130,20 @@ impl PipelineLayout {
         let handle = {
             let fns = device.fns();
             let mut output = MaybeUninit::uninit();
-            (fns.v1_0.create_pipeline_layout)(
-                device.handle(),
-                &create_info_vk,
-                ptr::null(),
-                output.as_mut_ptr(),
-            )
+            unsafe {
+                (fns.v1_0.create_pipeline_layout)(
+                    device.handle(),
+                    &create_info_vk,
+                    ptr::null(),
+                    output.as_mut_ptr(),
+                )
+            }
             .result()
             .map_err(VulkanError::from)?;
-            output.assume_init()
+            unsafe { output.assume_init() }
         };
 
-        Ok(Self::from_handle(device, handle, create_info))
+        Ok(unsafe { Self::from_handle(device, handle, create_info) })
     }
 
     /// Creates a new `PipelineLayout` from a raw object handle.
@@ -152,7 +155,7 @@ impl PipelineLayout {
     #[inline]
     pub unsafe fn from_handle(
         device: Arc<Device>,
-        handle: ash::vk::PipelineLayout,
+        handle: vk::PipelineLayout,
         create_info: PipelineLayoutCreateInfo,
     ) -> Arc<PipelineLayout> {
         let PipelineLayoutCreateInfo {
@@ -168,7 +171,7 @@ impl PipelineLayout {
             (
                 range.offset,
                 range.size,
-                ash::vk::ShaderStageFlags::from(range.stages),
+                vk::ShaderStageFlags::from(range.stages),
             )
         });
 
@@ -193,16 +196,19 @@ impl PipelineLayout {
                         stages |= range.stages;
                     }
                 }
-                // finished all stages
-                if stages.is_empty() {
+
+                if !stages.is_empty() {
+                    push_constant_ranges_disjoint.push(PushConstantRange {
+                        stages,
+                        offset: min_offset,
+                        size: max_offset - min_offset,
+                    });
+                }
+
+                if max_offset == u32::MAX {
                     break;
                 }
 
-                push_constant_ranges_disjoint.push(PushConstantRange {
-                    stages,
-                    offset: min_offset,
-                    size: max_offset - min_offset,
-                });
                 // prepare for next range
                 min_offset = max_offset;
             }
@@ -361,7 +367,7 @@ impl Drop for PipelineLayout {
 }
 
 unsafe impl VulkanObject for PipelineLayout {
-    type Handle = ash::vk::PipelineLayout;
+    type Handle = vk::PipelineLayout;
 
     #[inline]
     fn handle(&self) -> Self::Handle {
@@ -407,6 +413,14 @@ pub struct PipelineLayoutCreateInfo {
 impl Default for PipelineLayoutCreateInfo {
     #[inline]
     fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PipelineLayoutCreateInfo {
+    /// Returns a default `PipelineLayoutCreateInfo`.
+    #[inline]
+    pub const fn new() -> Self {
         Self {
             flags: PipelineLayoutCreateFlags::empty(),
             set_layouts: Vec::new(),
@@ -414,9 +428,7 @@ impl Default for PipelineLayoutCreateInfo {
             _ne: crate::NonExhaustive(()),
         }
     }
-}
 
-impl PipelineLayoutCreateInfo {
     pub(crate) fn validate(&self, device: &Device) -> Result<(), Box<ValidationError>> {
         let properties = device.physical_device().properties();
 
@@ -887,7 +899,7 @@ impl PipelineLayoutCreateInfo {
     pub(crate) fn to_vk<'a>(
         &self,
         fields1_vk: &'a PipelineLayoutCreateInfoFields1Vk,
-    ) -> ash::vk::PipelineLayoutCreateInfo<'a> {
+    ) -> vk::PipelineLayoutCreateInfo<'a> {
         let &Self {
             flags,
             set_layouts: _,
@@ -899,7 +911,7 @@ impl PipelineLayoutCreateInfo {
             push_constant_ranges_vk,
         } = fields1_vk;
 
-        ash::vk::PipelineLayoutCreateInfo::default()
+        vk::PipelineLayoutCreateInfo::default()
             .flags(flags.into())
             .set_layouts(set_layouts_vk)
             .push_constant_ranges(push_constant_ranges_vk)
@@ -926,8 +938,8 @@ impl PipelineLayoutCreateInfo {
 }
 
 pub(crate) struct PipelineLayoutCreateInfoFields1Vk {
-    pub(crate) set_layouts_vk: SmallVec<[ash::vk::DescriptorSetLayout; 4]>,
-    pub(crate) push_constant_ranges_vk: SmallVec<[ash::vk::PushConstantRange; 4]>,
+    pub(crate) set_layouts_vk: SmallVec<[vk::DescriptorSetLayout; 4]>,
+    pub(crate) push_constant_ranges_vk: SmallVec<[vk::PushConstantRange; 4]>,
 }
 
 vulkan_bitflags! {
@@ -970,15 +982,21 @@ pub struct PushConstantRange {
 impl Default for PushConstantRange {
     #[inline]
     fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PushConstantRange {
+    /// Returns a default `PushConstantRange`.
+    #[inline]
+    pub const fn new() -> Self {
         Self {
             stages: ShaderStages::empty(),
             offset: 0,
             size: 0,
         }
     }
-}
 
-impl PushConstantRange {
     pub(crate) fn validate(&self, device: &Device) -> Result<(), Box<ValidationError>> {
         let &Self {
             stages,
@@ -1054,14 +1072,14 @@ impl PushConstantRange {
     }
 
     #[allow(clippy::wrong_self_convention)]
-    pub(crate) fn to_vk(&self) -> ash::vk::PushConstantRange {
+    pub(crate) fn to_vk(&self) -> vk::PushConstantRange {
         let &Self {
             stages,
             offset,
             size,
         } = self;
 
-        ash::vk::PushConstantRange {
+        vk::PushConstantRange {
             stage_flags: stages.into(),
             offset,
             size,
@@ -1385,6 +1403,39 @@ mod tests {
                         stages: ShaderStages::TESSELLATION_CONTROL,
                         offset: 20,
                         size: 12,
+                    },
+                ][..],
+            ),
+            // input:
+            // - `0..8`, stage=vertex
+            // - `16..32`, stage=fragment
+            //
+            // output:
+            // - `0..8`, stage=vertex
+            // - `16..32`, stage=fragment
+            (
+                &[
+                    PushConstantRange {
+                        stages: ShaderStages::VERTEX,
+                        offset: 0,
+                        size: 8,
+                    },
+                    PushConstantRange {
+                        stages: ShaderStages::FRAGMENT,
+                        offset: 16,
+                        size: 16,
+                    },
+                ][..],
+                &[
+                    PushConstantRange {
+                        stages: ShaderStages::VERTEX,
+                        offset: 0,
+                        size: 8,
+                    },
+                    PushConstantRange {
+                        stages: ShaderStages::FRAGMENT,
+                        offset: 16,
+                        size: 16,
                     },
                 ][..],
             ),

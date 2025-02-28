@@ -297,9 +297,8 @@ dependencies = [
 
 [[package]]
 name = "concurrent-slotmap"
-version = "0.1.0-alpha.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "288086ecfcd80978f795a7ba8ffd9777d6dfcb6e5c6c74bba10e3d9a1eb52169"
+version = "0.1.0-alpha.2"
+source = "git+https://github.com/vulkano-rs/concurrent-slotmap?rev=c10c56adeae11fcc9cd0a1d5c36d3cf258d9f505#c10c56adeae11fcc9cd0a1d5c36d3cf258d9f505"
 dependencies = [
  "virtual-buffer",
 ]
@@ -394,6 +393,7 @@ dependencies = [
  "glam",
  "vulkano",
  "vulkano-shaders",
+ "vulkano-taskgraph",
  "winit",
 ]
 
@@ -1566,9 +1566,9 @@ dependencies = [
 
 [[package]]
 name = "slabbin"
-version = "1.1.0"
+version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fd33b7a607dbd960b5e78bb4740d1f86e84250eb03a12960ee1482c2a256063"
+checksum = "9db491c0d4152a069911a0fbdaca959691bf0b9d7110d98a7ed1c8e59b79ab30"
 
 [[package]]
 name = "smallvec"
@@ -1806,9 +1806,9 @@ checksum = "49874b5167b65d7193b8aba1567f5c7d93d001cafc34600cee003eda787e483f"
 
 [[package]]
 name = "virtual-buffer"
-version = "1.0.1"
+version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "00bbb9a832cd697a36c2abd5ef58c263b0bc33cdf280f704b895646ed3e9f595"
+checksum = "b434093a2de01d3b27e6246b0ececca4cc2a77f046bef06a9dc1216e3d892a91"
 dependencies = [
  "libc",
  "windows-targets 0.52.5",
@@ -1825,7 +1825,7 @@ dependencies = [
 
 [[package]]
 name = "vulkano"
-version = "0.34.0"
+version = "0.35.0"
 dependencies = [
  "ash",
  "bytemuck",
@@ -1837,7 +1837,6 @@ dependencies = [
  "libc",
  "libloading",
  "nom",
- "once_cell",
  "parking_lot",
  "proc-macro2",
  "quote",
@@ -1856,7 +1855,7 @@ dependencies = [
 
 [[package]]
 name = "vulkano-macros"
-version = "0.34.0"
+version = "0.35.0"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -1866,7 +1865,7 @@ dependencies = [
 
 [[package]]
 name = "vulkano-shaders"
-version = "0.34.0"
+version = "0.35.0"
 dependencies = [
  "foldhash",
  "heck",
@@ -1879,9 +1878,10 @@ dependencies = [
 
 [[package]]
 name = "vulkano-taskgraph"
-version = "0.34.0"
+version = "0.35.0"
 dependencies = [
  "ash",
+ "bytemuck",
  "concurrent-slotmap",
  "foldhash",
  "parking_lot",
@@ -1892,7 +1892,7 @@ dependencies = [
 
 [[package]]
 name = "vulkano-util"
-version = "0.34.0"
+version = "0.35.0"
 dependencies = [
  "foldhash",
  "vulkano",

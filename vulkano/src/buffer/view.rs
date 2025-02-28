@@ -46,15 +46,16 @@ use crate::{
     memory::{is_aligned, DeviceAlignment},
     DeviceSize, Validated, ValidationError, Version, VulkanError, VulkanObject,
 };
-use std::{mem::MaybeUninit, num::NonZeroU64, ops::Range, ptr, sync::Arc};
+use ash::vk;
+use std::{mem::MaybeUninit, num::NonZero, ops::Range, ptr, sync::Arc};
 
 /// Represents a way for the GPU to interpret buffer data. See the documentation of the
 /// `view` module.
 #[derive(Debug)]
 pub struct BufferView {
-    handle: ash::vk::BufferView,
+    handle: vk::BufferView,
     subbuffer: Subbuffer<[u8]>,
-    id: NonZeroU64,
+    id: NonZero<u64>,
 
     format: Format,
     format_features: FormatFeatures,
@@ -303,7 +304,7 @@ impl BufferView {
             unsafe { output.assume_init() }
         };
 
-        Ok(Self::from_handle(subbuffer, handle, create_info))
+        Ok(unsafe { Self::from_handle(subbuffer, handle, create_info) })
     }
 
     /// Creates a new `BufferView` from a raw object handle.
@@ -314,7 +315,7 @@ impl BufferView {
     /// - `subbuffer` and `create_info` must match the info used to create the object.
     pub unsafe fn from_handle(
         subbuffer: Subbuffer<impl ?Sized>,
-        handle: ash::vk::BufferView,
+        handle: vk::BufferView,
         create_info: BufferViewCreateInfo,
     ) -> Arc<BufferView> {
         let &BufferViewCreateInfo { format, _ne: _ } = &create_info;
@@ -377,7 +378,7 @@ impl Drop for BufferView {
 }
 
 unsafe impl VulkanObject for BufferView {
-    type Handle = ash::vk::BufferView;
+    type Handle = vk::BufferView;
 
     #[inline]
     fn handle(&self) -> Self::Handle {
@@ -408,14 +409,20 @@ pub struct BufferViewCreateInfo {
 impl Default for BufferViewCreateInfo {
     #[inline]
     fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BufferViewCreateInfo {
+    /// Returns a default `BufferViewCreateInfo`.
+    #[inline]
+    pub const fn new() -> Self {
         Self {
             format: Format::UNDEFINED,
             _ne: crate::NonExhaustive(()),
         }
     }
-}
 
-impl BufferViewCreateInfo {
     pub(crate) fn validate(&self, device: &Device) -> Result<(), Box<ValidationError>> {
         let Self { format, _ne: _ } = self;
 
@@ -427,14 +434,11 @@ impl BufferViewCreateInfo {
         Ok(())
     }
 
-    pub(crate) fn to_vk(
-        &self,
-        subbuffer: &Subbuffer<[u8]>,
-    ) -> ash::vk::BufferViewCreateInfo<'static> {
+    pub(crate) fn to_vk(&self, subbuffer: &Subbuffer<[u8]>) -> vk::BufferViewCreateInfo<'static> {
         let &Self { format, _ne: _ } = self;
 
-        ash::vk::BufferViewCreateInfo::default()
-            .flags(ash::vk::BufferViewCreateFlags::empty())
+        vk::BufferViewCreateInfo::default()
+            .flags(vk::BufferViewCreateFlags::empty())
             .buffer(subbuffer.buffer().handle())
             .format(format.into())
             .offset(subbuffer.offset())

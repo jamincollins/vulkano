@@ -9,6 +9,30 @@
 
 ### Public dependency updates
 
+- Rust version: 1.80.0
+
+### Breaking changes
+
+Changes to `GraphicsPipeline`:
+- `ColorBlendState::new` and `ViewportState::new` (previously deprecated, now undeprecated) now return the same as `Default::default()`.
+
+### Additions
+
+- Added `new` constructors to all `*Info`-like structs.
+
+### Bugs fixed
+
+# Version 0.35.1 (2025-02-08)
+
+### Bugs fixed
+- Fixed a bug in `StandardMemoryAllocator` where if the suballocation count of a `DeviceMemory` block would drop to zero, no more suballocations could be made, leading to needless allocations of new `DeviceMemory` blocks.
+- Fixed a panic for non-contiguous push constants ranges.
+- Vulkano-taskgraph: Fixed a panic that would happen when looking up the previous barrier and it's an initial barrier.
+
+# Version 0.35.0 (2025-02-06)
+
+### Public dependency updates
+
 - [ash](https://crates.io/crates/ash) 0.38.0 (Vulkan 1.3.281)
 - [raw-window-handle](https://crates.io/raw-window-handle) 0.6
 - [winit](https://crates.io/crates/winit) 0.30
@@ -75,6 +99,7 @@ Changes to buffers:
 
 Changes to images:
 - `ImageMemory` is now marked non-exhaustive.
+- `ImageMemory::Sparse` no longer has a field for memory requirements, this is now queried directly from the image.
 
 Changes to draw/dispatch commands:
 - These are now `unsafe`, as the shader can perform invalid operations outside of Vulkano's control.
@@ -128,6 +153,7 @@ Device features:
 Vulkan APIs:
 - Ability to update existing descriptor sets.
 - Support for querying memory requirements directly from the device.
+- Support for sparse binding.
 
 Other:
 - Partially validated versions of `submit` and `present` commands (called via `QueueGuard`).

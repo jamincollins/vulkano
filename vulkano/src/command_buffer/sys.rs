@@ -7,6 +7,7 @@ use crate::{
     device::{Device, DeviceOwned, QueueFamilyProperties},
     Validated, ValidationError, VulkanError, VulkanObject,
 };
+use ash::vk;
 use std::{fmt::Debug, mem::ManuallyDrop, sync::Arc};
 
 /// A command buffer in the recording state.
@@ -86,7 +87,7 @@ impl RecordingCommandBuffer {
             let begin_info_vk = begin_info.to_vk(&begin_info_fields1_vk);
 
             let fns = allocation.inner.device().fns();
-            (fns.v1_0.begin_command_buffer)(allocation.inner.handle(), &begin_info_vk)
+            unsafe { (fns.v1_0.begin_command_buffer)(allocation.inner.handle(), &begin_info_vk) }
                 .result()
                 .map_err(VulkanError::from)?;
         }
@@ -110,7 +111,7 @@ impl RecordingCommandBuffer {
     #[inline]
     pub unsafe fn end(self) -> Result<CommandBuffer, VulkanError> {
         let fns = self.device().fns();
-        (fns.v1_0.end_command_buffer)(self.handle())
+        unsafe { (fns.v1_0.end_command_buffer)(self.handle()) }
             .result()
             .map_err(VulkanError::from)?;
 
@@ -155,7 +156,7 @@ impl Drop for RecordingCommandBuffer {
 }
 
 unsafe impl VulkanObject for RecordingCommandBuffer {
-    type Handle = ash::vk::CommandBuffer;
+    type Handle = vk::CommandBuffer;
 
     #[inline]
     fn handle(&self) -> Self::Handle {
@@ -201,21 +202,27 @@ pub struct CommandBufferBeginInfo {
 impl Default for CommandBufferBeginInfo {
     #[inline]
     fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CommandBufferBeginInfo {
+    /// Returns a default `CommandBufferBeginInfo`.
+    #[inline]
+    pub const fn new() -> Self {
         Self {
             usage: CommandBufferUsage::MultipleSubmit,
             inheritance_info: None,
             _ne: crate::NonExhaustive(()),
         }
     }
-}
 
-impl CommandBufferBeginInfo {
     pub(crate) fn validate(&self, device: &Device) -> Result<(), Box<ValidationError>> {
-        let &Self {
+        let Self {
             usage: _,
-            ref inheritance_info,
+            inheritance_info,
             _ne: _,
-        } = &self;
+        } = self;
 
         if let Some(inheritance_info) = &inheritance_info {
             inheritance_info
@@ -232,24 +239,23 @@ impl CommandBufferBeginInfo {
     pub(crate) fn to_vk<'a>(
         &self,
         fields1_vk: &'a BeginInfoFields1Vk<'_>,
-    ) -> ash::vk::CommandBufferBeginInfo<'a> {
+    ) -> vk::CommandBufferBeginInfo<'a> {
         let &Self {
-            usage: _,
+            usage,
             ref inheritance_info,
             _ne: _,
         } = self;
 
-        let flags_vk = inheritance_info
-            .as_ref()
-            .and_then(|inheritance_info| {
-                inheritance_info
-                    .render_pass
-                    .is_some()
-                    .then_some(ash::vk::CommandBufferUsageFlags::RENDER_PASS_CONTINUE)
-            })
-            .unwrap_or_default();
+        let mut flags_vk = vk::CommandBufferUsageFlags::from(usage);
 
-        let mut val_vk = ash::vk::CommandBufferBeginInfo::default().flags(flags_vk);
+        if inheritance_info
+            .as_ref()
+            .is_some_and(|inheritance_info| inheritance_info.render_pass.is_some())
+        {
+            flags_vk |= vk::CommandBufferUsageFlags::RENDER_PASS_CONTINUE;
+        }
+
+        let mut val_vk = vk::CommandBufferBeginInfo::default().flags(flags_vk);
 
         let BeginInfoFields1Vk {
             inheritance_info_vk,
@@ -317,7 +323,7 @@ impl CommandBufferBeginInfo {
 }
 
 pub(crate) struct BeginInfoFields1Vk<'a> {
-    pub(crate) inheritance_info_vk: Option<ash::vk::CommandBufferInheritanceInfo<'a>>,
+    pub(crate) inheritance_info_vk: Option<vk::CommandBufferInheritanceInfo<'a>>,
 }
 
 pub(crate) struct BeginInfoFields1ExtensionsVk<'a> {
@@ -370,7 +376,7 @@ impl CommandBuffer {
 }
 
 unsafe impl VulkanObject for CommandBuffer {
-    type Handle = ash::vk::CommandBuffer;
+    type Handle = vk::CommandBuffer;
 
     #[inline]
     fn handle(&self) -> Self::Handle {

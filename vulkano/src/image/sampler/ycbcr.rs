@@ -69,7 +69,7 @@
 //!             DescriptorSetLayoutBinding {
 //!                 stages: ShaderStage::Fragment.into(),
 //!                 immutable_samplers: vec![sampler],
-//!                 ..DescriptorSetLayoutBinding::descriptor_type(
+//!                 ..DescriptorSetLayoutBinding::new(
 //!                     DescriptorType::CombinedImageSampler
 //!                 )
 //!             },
@@ -117,14 +117,15 @@ use crate::{
     Requires, RequiresAllOf, RequiresOneOf, Validated, ValidationError, Version, VulkanError,
     VulkanObject,
 };
-use std::{mem::MaybeUninit, num::NonZeroU64, ptr, sync::Arc};
+use ash::vk;
+use std::{mem::MaybeUninit, num::NonZero, ptr, sync::Arc};
 
 /// Describes how sampled image data should converted from a YCbCr representation to an RGB one.
 #[derive(Debug)]
 pub struct SamplerYcbcrConversion {
-    handle: ash::vk::SamplerYcbcrConversion,
+    handle: vk::SamplerYcbcrConversion,
     device: InstanceOwnedDebugWrapper<Arc<Device>>,
-    id: NonZeroU64,
+    id: NonZero<u64>,
 
     format: Format,
     ycbcr_model: SamplerYcbcrModelConversion,
@@ -201,7 +202,7 @@ impl SamplerYcbcrConversion {
             unsafe { output.assume_init() }
         };
 
-        Ok(Self::from_handle(device, handle, create_info))
+        Ok(unsafe { Self::from_handle(device, handle, create_info) })
     }
 
     /// Creates a new `SamplerYcbcrConversion` from a raw object handle.
@@ -213,7 +214,7 @@ impl SamplerYcbcrConversion {
     #[inline]
     pub unsafe fn from_handle(
         device: Arc<Device>,
-        handle: ash::vk::SamplerYcbcrConversion,
+        handle: vk::SamplerYcbcrConversion,
         create_info: SamplerYcbcrConversionCreateInfo,
     ) -> Arc<SamplerYcbcrConversion> {
         let SamplerYcbcrConversionCreateInfo {
@@ -327,7 +328,7 @@ impl Drop for SamplerYcbcrConversion {
 }
 
 unsafe impl VulkanObject for SamplerYcbcrConversion {
-    type Handle = ash::vk::SamplerYcbcrConversion;
+    type Handle = vk::SamplerYcbcrConversion;
 
     #[inline]
     fn handle(&self) -> Self::Handle {
@@ -420,6 +421,14 @@ pub struct SamplerYcbcrConversionCreateInfo {
 impl Default for SamplerYcbcrConversionCreateInfo {
     #[inline]
     fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SamplerYcbcrConversionCreateInfo {
+    /// Returns a default `SamplerYcbcrConversionCreateInfo`.
+    #[inline]
+    pub const fn new() -> Self {
         Self {
             format: Format::UNDEFINED,
             ycbcr_model: SamplerYcbcrModelConversion::RgbIdentity,
@@ -431,9 +440,7 @@ impl Default for SamplerYcbcrConversionCreateInfo {
             _ne: crate::NonExhaustive(()),
         }
     }
-}
 
-impl SamplerYcbcrConversionCreateInfo {
     pub(crate) fn validate(&self, device: &Device) -> Result<(), Box<ValidationError>> {
         let &Self {
             format,
@@ -810,7 +817,7 @@ impl SamplerYcbcrConversionCreateInfo {
         Ok(())
     }
 
-    pub(crate) fn to_vk(&self) -> ash::vk::SamplerYcbcrConversionCreateInfo<'static> {
+    pub(crate) fn to_vk(&self) -> vk::SamplerYcbcrConversionCreateInfo<'static> {
         let &Self {
             format,
             ycbcr_model,
@@ -822,7 +829,7 @@ impl SamplerYcbcrConversionCreateInfo {
             _ne: _,
         } = self;
 
-        ash::vk::SamplerYcbcrConversionCreateInfo::default()
+        vk::SamplerYcbcrConversionCreateInfo::default()
             .format(format.into())
             .ycbcr_model(ycbcr_model.into())
             .ycbcr_range(ycbcr_range.into())

@@ -4,28 +4,20 @@ use scene::SceneTask;
 use std::{error::Error, sync::Arc};
 use vulkano::{
     command_buffer::allocator::StandardCommandBufferAllocator,
-    descriptor_set::{
-        allocator::StandardDescriptorSetAllocator,
-        layout::{
-            DescriptorSetLayout, DescriptorSetLayoutBinding, DescriptorSetLayoutCreateInfo,
-            DescriptorType,
-        },
-    },
     device::{
         physical::PhysicalDeviceType, Device, DeviceCreateInfo, DeviceExtensions, DeviceFeatures,
         Queue, QueueCreateInfo, QueueFlags,
     },
-    image::{ImageFormatInfo, ImageUsage},
+    image::{view::ImageView, ImageFormatInfo, ImageLayout, ImageUsage},
     instance::{Instance, InstanceCreateFlags, InstanceCreateInfo, InstanceExtensions},
     memory::allocator::StandardMemoryAllocator,
-    pipeline::{layout::PipelineLayoutCreateInfo, PipelineLayout},
-    shader::ShaderStages,
     swapchain::{Surface, Swapchain, SwapchainCreateInfo},
     Validated, Version, VulkanError, VulkanLibrary,
 };
 use vulkano_taskgraph::{
-    graph::{CompileInfo, ExecutableTaskGraph, ExecuteError, NodeId, TaskGraph},
-    resource::{AccessType, Flight, ImageLayoutType, Resources},
+    descriptor_set::{BindlessContext, StorageImageId},
+    graph::{CompileInfo, ExecutableTaskGraph, ExecuteError, TaskGraph},
+    resource::{AccessTypes, Flight, ImageLayoutType, Resources, ResourcesCreateInfo},
     resource_map, Id, QueueFamilyType,
 };
 use winit::{
@@ -58,9 +50,9 @@ struct App {
 pub struct RenderContext {
     window: Arc<Window>,
     swapchain_id: Id<Swapchain>,
+    swapchain_storage_image_ids: Vec<StorageImageId>,
     recreate_swapchain: bool,
     task_graph: ExecutableTaskGraph<Self>,
-    scene_node_id: NodeId,
     virtual_swapchain_id: Id<Swapchain>,
 }
 
@@ -73,7 +65,6 @@ impl App {
             InstanceCreateInfo {
                 flags: InstanceCreateFlags::ENUMERATE_PORTABILITY,
                 enabled_extensions: InstanceExtensions {
-                    ext_debug_utils: true,
                     ext_swapchain_colorspace: true,
                     ..required_extensions
                 },
@@ -89,13 +80,24 @@ impl App {
             khr_synchronization2: true,
             khr_deferred_host_operations: true,
             khr_acceleration_structure: true,
-            ..DeviceExtensions::empty()
+            ..BindlessContext::required_extensions(&instance)
+        };
+        let device_features = DeviceFeatures {
+            acceleration_structure: true,
+            ray_tracing_pipeline: true,
+            buffer_device_address: true,
+            synchronization2: true,
+            descriptor_binding_acceleration_structure_update_after_bind: true,
+            ..BindlessContext::required_features(&instance)
         };
         let (physical_device, queue_family_index) = instance
             .enumerate_physical_devices()
             .unwrap()
             .filter(|p| p.api_version() >= Version::V1_3)
-            .filter(|p| p.supported_extensions().contains(&device_extensions))
+            .filter(|p| {
+                p.supported_extensions().contains(&device_extensions)
+                    && p.supported_features().contains(&device_features)
+            })
             .filter_map(|p| {
                 p.queue_family_properties()
                     .iter()
@@ -117,21 +119,21 @@ impl App {
             })
             .unwrap();
 
+        println!(
+            "Using device: {} (type: {:?})",
+            physical_device.properties().device_name,
+            physical_device.properties().device_type,
+        );
+
         let (device, mut queues) = Device::new(
             physical_device,
             DeviceCreateInfo {
                 enabled_extensions: device_extensions,
+                enabled_features: device_features,
                 queue_create_infos: vec![QueueCreateInfo {
                     queue_family_index,
                     ..Default::default()
                 }],
-                enabled_features: DeviceFeatures {
-                    acceleration_structure: true,
-                    ray_tracing_pipeline: true,
-                    buffer_device_address: true,
-                    synchronization2: true,
-                    ..Default::default()
-                },
                 ..Default::default()
             },
         )
@@ -139,7 +141,14 @@ impl App {
 
         let queue = queues.next().unwrap();
 
-        let resources = Resources::new(&device, &Default::default());
+        let resources = Resources::new(
+            &device,
+            &ResourcesCreateInfo {
+                bindless_context: Some(&Default::default()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         let flight_id = resources.create_flight(MAX_FRAMES_IN_FLIGHT).unwrap();
 
@@ -162,32 +171,7 @@ impl ApplicationHandler for App {
                 .unwrap(),
         );
         let surface = Surface::from_window(self.instance.clone(), window.clone()).unwrap();
-
-        let physical_device = self.device.physical_device();
-        let supported_surface_formats = physical_device
-            .surface_formats(&surface, Default::default())
-            .unwrap();
-
-        // For each supported format, check if it is supported for storage images
-        let supported_storage_formats = supported_surface_formats
-            .into_iter()
-            .filter(|(format, _)| {
-                physical_device
-                    .image_format_properties(ImageFormatInfo {
-                        format: *format,
-                        usage: ImageUsage::STORAGE,
-                        ..Default::default()
-                    })
-                    .unwrap()
-                    .is_some()
-            })
-            .collect::<Vec<_>>();
-
-        println!(
-            "Using device: {} (type: {:?})",
-            physical_device.properties().device_name,
-            physical_device.properties().device_type,
-        );
+        let window_size = window.inner_size();
 
         let swapchain_id = {
             let surface_capabilities = self
@@ -195,10 +179,23 @@ impl ApplicationHandler for App {
                 .physical_device()
                 .surface_capabilities(&surface, Default::default())
                 .unwrap();
-
-            let (swapchain_format, swapchain_color_space) = supported_storage_formats
-                .first()
-                .map(|(format, color_space)| (*format, *color_space))
+            let (image_format, image_color_space) = self
+                .device
+                .physical_device()
+                .surface_formats(&surface, Default::default())
+                .unwrap()
+                .into_iter()
+                .find(|(format, _)| {
+                    self.device
+                        .physical_device()
+                        .image_format_properties(ImageFormatInfo {
+                            format: *format,
+                            usage: ImageUsage::STORAGE,
+                            ..Default::default()
+                        })
+                        .unwrap()
+                        .is_some()
+                })
                 .unwrap();
 
             self.resources
@@ -207,10 +204,13 @@ impl ApplicationHandler for App {
                     surface,
                     SwapchainCreateInfo {
                         min_image_count: surface_capabilities.min_image_count.max(3),
-                        image_format: swapchain_format,
-                        image_extent: window.inner_size().into(),
-                        image_usage: ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT,
-                        image_color_space: swapchain_color_space,
+                        image_format,
+                        image_extent: window_size.into(),
+                        // To simplify the example, we will directly write to the swapchain images
+                        // from the ray tracing shader. This requires the images to support storage
+                        // usage.
+                        image_usage: ImageUsage::STORAGE,
+                        image_color_space,
                         composite_alpha: surface_capabilities
                             .supported_composite_alpha
                             .into_iter()
@@ -222,100 +222,35 @@ impl ApplicationHandler for App {
                 .unwrap()
         };
 
-        let pipeline_layout = PipelineLayout::new(
-            self.device.clone(),
-            PipelineLayoutCreateInfo {
-                set_layouts: vec![
-                    DescriptorSetLayout::new(
-                        self.device.clone(),
-                        DescriptorSetLayoutCreateInfo {
-                            bindings: [
-                                (
-                                    0,
-                                    DescriptorSetLayoutBinding {
-                                        stages: ShaderStages::RAYGEN,
-                                        ..DescriptorSetLayoutBinding::descriptor_type(
-                                            DescriptorType::AccelerationStructure,
-                                        )
-                                    },
-                                ),
-                                (
-                                    1,
-                                    DescriptorSetLayoutBinding {
-                                        stages: ShaderStages::RAYGEN,
-                                        ..DescriptorSetLayoutBinding::descriptor_type(
-                                            DescriptorType::UniformBuffer,
-                                        )
-                                    },
-                                ),
-                            ]
-                            .into_iter()
-                            .collect(),
-                            ..Default::default()
-                        },
-                    )
-                    .unwrap(),
-                    DescriptorSetLayout::new(
-                        self.device.clone(),
-                        DescriptorSetLayoutCreateInfo {
-                            bindings: [(
-                                0,
-                                DescriptorSetLayoutBinding {
-                                    stages: ShaderStages::RAYGEN,
-                                    ..DescriptorSetLayoutBinding::descriptor_type(
-                                        DescriptorType::StorageImage,
-                                    )
-                                },
-                            )]
-                            .into_iter()
-                            .collect(),
-                            ..Default::default()
-                        },
-                    )
-                    .unwrap(),
-                ],
-                push_constant_ranges: vec![],
-                ..Default::default()
-            },
-        )
-        .unwrap();
-
-        let descriptor_set_allocator = Arc::new(StandardDescriptorSetAllocator::new(
-            self.device.clone(),
-            Default::default(),
-        ));
+        let swapchain_storage_image_ids =
+            window_size_dependent_setup(&self.resources, swapchain_id);
 
         let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(self.device.clone()));
-
         let command_buffer_allocator = Arc::new(StandardCommandBufferAllocator::new(
             self.device.clone(),
             Default::default(),
         ));
 
-        let mut task_graph = TaskGraph::new(&self.resources, 3, 2);
+        let mut task_graph = TaskGraph::new(&self.resources);
 
         let virtual_swapchain_id = task_graph.add_swapchain(&SwapchainCreateInfo::default());
 
-        let scene_node_id = task_graph
+        task_graph
             .create_task_node(
                 "Scene",
                 QueueFamilyType::Graphics,
                 SceneTask::new(
                     self,
-                    pipeline_layout.clone(),
-                    swapchain_id,
                     virtual_swapchain_id,
-                    descriptor_set_allocator,
                     memory_allocator,
                     command_buffer_allocator,
                 ),
             )
             .image_access(
                 virtual_swapchain_id.current_image_id(),
-                AccessType::RayTracingShaderStorageWrite,
+                AccessTypes::RAY_TRACING_SHADER_STORAGE_WRITE,
                 ImageLayoutType::General,
-            )
-            .build();
+            );
 
         let task_graph = unsafe {
             task_graph.compile(&CompileInfo {
@@ -330,10 +265,10 @@ impl ApplicationHandler for App {
         self.rcx = Some(RenderContext {
             window,
             swapchain_id,
+            swapchain_storage_image_ids,
             virtual_swapchain_id,
             recreate_swapchain: false,
             task_graph,
-            scene_node_id,
         });
     }
 
@@ -344,6 +279,7 @@ impl ApplicationHandler for App {
         event: WindowEvent,
     ) {
         let rcx = self.rcx.as_mut().unwrap();
+        let bcx = self.resources.bindless_context().unwrap();
 
         match event {
             WindowEvent::CloseRequested => {
@@ -370,13 +306,17 @@ impl ApplicationHandler for App {
                         })
                         .expect("failed to recreate swapchain");
 
-                    rcx.task_graph
-                        .task_node_mut(rcx.scene_node_id)
-                        .unwrap()
-                        .task_mut()
-                        .downcast_mut::<SceneTask>()
-                        .unwrap()
-                        .handle_resize(&self.resources, rcx.swapchain_id);
+                    // FIXME(taskgraph): safe resource destruction
+                    flight
+                        .wait_for_frame(flight.current_frame() - 1, None)
+                        .unwrap();
+
+                    for &id in &rcx.swapchain_storage_image_ids {
+                        unsafe { bcx.global_set().remove_storage_image(id) };
+                    }
+
+                    rcx.swapchain_storage_image_ids =
+                        window_size_dependent_setup(&self.resources, rcx.swapchain_id);
 
                     rcx.recreate_swapchain = false;
                 }
@@ -413,4 +353,26 @@ impl ApplicationHandler for App {
         let rcx = self.rcx.as_mut().unwrap();
         rcx.window.request_redraw();
     }
+}
+
+/// This function is called once during initialization, then again whenever the window is resized.
+fn window_size_dependent_setup(
+    resources: &Resources,
+    swapchain_id: Id<Swapchain>,
+) -> Vec<StorageImageId> {
+    let bcx = resources.bindless_context().unwrap();
+    let swapchain_state = resources.swapchain(swapchain_id).unwrap();
+    let images = swapchain_state.images();
+
+    let swapchain_storage_image_ids = images
+        .iter()
+        .map(|image| {
+            let image_view = ImageView::new_default(image.clone()).unwrap();
+
+            bcx.global_set()
+                .add_storage_image(image_view, ImageLayout::General)
+        })
+        .collect();
+
+    swapchain_storage_image_ids
 }

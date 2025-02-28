@@ -83,9 +83,10 @@ use crate::{
     },
     range_map::RangeMap,
     sync::{future::AccessError, AccessConflict, CurrentAccess, Sharing},
-    DeviceSize, NonNullDeviceAddress, Requires, RequiresAllOf, RequiresOneOf, Validated,
-    ValidationError, Version, VulkanError, VulkanObject,
+    DeviceAddress, DeviceSize, Requires, RequiresAllOf, RequiresOneOf, Validated, ValidationError,
+    Version, VulkanError, VulkanObject,
 };
+use ash::vk;
 use parking_lot::{Mutex, MutexGuard};
 use smallvec::SmallVec;
 use std::{
@@ -93,6 +94,7 @@ use std::{
     fmt::{Display, Formatter},
     hash::{Hash, Hasher},
     marker::PhantomData,
+    num::NonZero,
     ops::Range,
     sync::Arc,
 };
@@ -377,8 +379,9 @@ impl Buffer {
         allocation_info: AllocationCreateInfo,
         layout: DeviceLayout,
     ) -> Result<Arc<Self>, Validated<AllocateBufferError>> {
-        // TODO: Enable once sparse binding materializes
-        // assert!(!allocate_info.flags.contains(BufferCreateFlags::SPARSE_BINDING));
+        assert!(!create_info
+            .flags
+            .contains(BufferCreateFlags::SPARSE_BINDING));
 
         assert_eq!(
             create_info.size, 0,
@@ -468,7 +471,7 @@ impl Buffer {
 
     /// Returns the device address for this buffer.
     // TODO: Caching?
-    pub fn device_address(&self) -> Result<NonNullDeviceAddress, Box<ValidationError>> {
+    pub fn device_address(&self) -> Result<NonZero<DeviceAddress>, Box<ValidationError>> {
         self.validate_device_address()?;
 
         Ok(unsafe { self.device_address_unchecked() })
@@ -500,24 +503,24 @@ impl Buffer {
     }
 
     #[cfg_attr(not(feature = "document_unchecked"), doc(hidden))]
-    pub unsafe fn device_address_unchecked(&self) -> NonNullDeviceAddress {
+    pub unsafe fn device_address_unchecked(&self) -> NonZero<DeviceAddress> {
         let device = self.device();
 
-        let info_vk = ash::vk::BufferDeviceAddressInfo::default().buffer(self.handle());
+        let info_vk = vk::BufferDeviceAddressInfo::default().buffer(self.handle());
 
         let ptr = {
             let fns = device.fns();
-            let f = if device.api_version() >= Version::V1_2 {
+            let func = if device.api_version() >= Version::V1_2 {
                 fns.v1_2.get_buffer_device_address
             } else if device.enabled_extensions().khr_buffer_device_address {
                 fns.khr_buffer_device_address.get_buffer_device_address_khr
             } else {
                 fns.ext_buffer_device_address.get_buffer_device_address_ext
             };
-            f(device.handle(), &info_vk)
+            unsafe { func(device.handle(), &info_vk) }
         };
 
-        NonNullDeviceAddress::new(ptr).unwrap()
+        NonZero::new(ptr).unwrap()
     }
 
     pub(crate) fn state(&self) -> MutexGuard<'_, BufferState> {
@@ -526,7 +529,7 @@ impl Buffer {
 }
 
 unsafe impl VulkanObject for Buffer {
-    type Handle = ash::vk::Buffer;
+    type Handle = vk::Buffer;
 
     #[inline]
     fn handle(&self) -> Self::Handle {
@@ -802,25 +805,24 @@ vulkan_bitflags! {
     /// Flags specifying additional properties of a buffer.
     BufferCreateFlags = BufferCreateFlags(u32);
 
-    /* TODO: enable
-    /// The buffer will be backed by sparse memory binding (through queue commands) instead of
-    /// regular binding (through [`bind_memory`]).
+    /// The buffer will be backed by sparse memory binding (through the [`bind_sparse`] queue
+    /// command) instead of regular binding (through [`bind_memory`]).
     ///
     /// The [`sparse_binding`] feature must be enabled on the device.
     ///
+    /// [`bind_sparse`]: crate::device::queue::QueueGuard::bind_sparse
     /// [`bind_memory`]: sys::RawBuffer::bind_memory
     /// [`sparse_binding`]: crate::device::DeviceFeatures::sparse_binding
-    SPARSE_BINDING = SPARSE_BINDING,*/
+    SPARSE_BINDING = SPARSE_BINDING,
 
-    /* TODO: enable
     /// The buffer can be used without being fully resident in memory at the time of use.
     ///
-    /// This requires the `sparse_binding` flag as well.
+    /// This requires the [`BufferCreateFlags::SPARSE_BINDING`] flag as well.
     ///
     /// The [`sparse_residency_buffer`] feature must be enabled on the device.
     ///
     /// [`sparse_residency_buffer`]: crate::device::DeviceFeatures::sparse_residency_buffer
-    SPARSE_RESIDENCY = SPARSE_RESIDENCY,*/
+    SPARSE_RESIDENCY = SPARSE_RESIDENCY,
 
     /* TODO: enable
     /// The buffer's memory can alias with another buffer or a different part of the same buffer.
@@ -869,15 +871,21 @@ pub struct ExternalBufferInfo {
 }
 
 impl ExternalBufferInfo {
-    /// Returns an `ExternalBufferInfo` with the specified `handle_type`.
+    /// Returns a default `ExternalBufferInfo` with the provided `handle_type`.
     #[inline]
-    pub fn handle_type(handle_type: ExternalMemoryHandleType) -> Self {
+    pub const fn new(handle_type: ExternalMemoryHandleType) -> Self {
         Self {
             flags: BufferCreateFlags::empty(),
             usage: BufferUsage::empty(),
             handle_type,
             _ne: crate::NonExhaustive(()),
         }
+    }
+
+    #[deprecated(since = "0.36.0", note = "use `new` instead")]
+    #[inline]
+    pub fn handle_type(handle_type: ExternalMemoryHandleType) -> Self {
+        Self::new(handle_type)
     }
 
     pub(crate) fn validate(
@@ -924,7 +932,7 @@ impl ExternalBufferInfo {
         Ok(())
     }
 
-    pub(crate) fn to_vk(&self) -> ash::vk::PhysicalDeviceExternalBufferInfo<'static> {
+    pub(crate) fn to_vk(&self) -> vk::PhysicalDeviceExternalBufferInfo<'static> {
         let &Self {
             flags,
             usage,
@@ -932,7 +940,7 @@ impl ExternalBufferInfo {
             _ne: _,
         } = self;
 
-        ash::vk::PhysicalDeviceExternalBufferInfo::default()
+        vk::PhysicalDeviceExternalBufferInfo::default()
             .flags(flags.into())
             .usage(usage.into())
             .handle_type(handle_type.into())
@@ -948,12 +956,12 @@ pub struct ExternalBufferProperties {
 }
 
 impl ExternalBufferProperties {
-    pub(crate) fn to_mut_vk() -> ash::vk::ExternalBufferProperties<'static> {
-        ash::vk::ExternalBufferProperties::default()
+    pub(crate) fn to_mut_vk() -> vk::ExternalBufferProperties<'static> {
+        vk::ExternalBufferProperties::default()
     }
 
-    pub(crate) fn from_vk(val_vk: &ash::vk::ExternalBufferProperties<'_>) -> Self {
-        let &ash::vk::ExternalBufferProperties {
+    pub(crate) fn from_vk(val_vk: &vk::ExternalBufferProperties<'_>) -> Self {
+        let &vk::ExternalBufferProperties {
             ref external_memory_properties,
             ..
         } = val_vk;

@@ -236,6 +236,9 @@ unsafe impl Suballocator for FreeListAllocator {
         // allocation of `self`, which means that `node_ptr` is the same one we gave out on
         // allocation, making it a valid pointer.
         let node_ptr = unsafe { NonNull::new_unchecked(node_ptr) };
+
+        debug_assert!(self.suballocations.node_allocator.contains(node_ptr));
+
         let node = unsafe { *node_ptr.as_ptr() };
 
         debug_assert_ne!(node.allocation_type, SuballocationType::Free);
@@ -268,6 +271,7 @@ unsafe impl Suballocator for FreeListAllocator {
         self.suballocations.head = root_ptr;
         self.suballocations.tail = root_ptr;
         self.suballocations.len = 1;
+        self.suballocations.free_list.push(root_ptr);
     }
 
     #[inline]
@@ -446,7 +450,7 @@ impl SuballocationList {
 
             if prev.allocation_type == SuballocationType::Free {
                 // SAFETY: We checked that the suballocation is free.
-                self.allocate(prev_ptr);
+                unsafe { self.allocate(prev_ptr) };
 
                 unsafe { (*node_ptr.as_ptr()).prev = prev.prev };
                 unsafe { (*node_ptr.as_ptr()).offset = prev.offset };
@@ -480,7 +484,7 @@ impl SuballocationList {
 
             if next.allocation_type == SuballocationType::Free {
                 // SAFETY: Same as above.
-                self.allocate(next_ptr);
+                unsafe { self.allocate(next_ptr) };
 
                 unsafe { (*node_ptr.as_ptr()).next = next.next };
                 // This is overflow-safe for the same reason as above.

@@ -2,7 +2,7 @@ use super::{AccessCheckError, GpuFuture};
 use crate::{
     buffer::Buffer,
     command_buffer::{SemaphoreSubmitInfo, SubmitInfo},
-    device::{Device, DeviceOwned, Queue, QueueFlags},
+    device::{Device, DeviceOwned, Queue},
     image::{Image, ImageLayout},
     swapchain::Swapchain,
     sync::{
@@ -282,10 +282,6 @@ where
                 debug_assert!(!partially_flushed);
                 // Same remark as `CommandBuffer`.
                 assert!(fence.is_none());
-                debug_assert!(queue.device().physical_device().queue_family_properties()
-                    [queue.queue_family_index() as usize]
-                    .queue_flags
-                    .intersects(QueueFlags::SPARSE_BINDING));
 
                 unsafe { queue_bind_sparse(&queue, bind_infos, Some(new_fence.clone())) }
                     .map_err(OutcomeErr::Full)
@@ -440,7 +436,7 @@ where
         let state = self.state.lock();
         match *state {
             FenceSignalFutureState::Flushed(ref prev, _) => {
-                prev.signal_finished();
+                unsafe { prev.signal_finished() };
             }
             FenceSignalFutureState::Cleaned | FenceSignalFutureState::Poisoned => (),
             _ => unreachable!(),
@@ -568,7 +564,7 @@ where
     unsafe fn build_submission(&self) -> Result<SubmitAnyBuilder, Validated<VulkanError>> {
         // Note that this is sound because we always return `SubmitAnyBuilder::Empty`. See the
         // documentation of `build_submission`.
-        (**self).build_submission()
+        unsafe { (**self).build_submission() }
     }
 
     fn flush(&self) -> Result<(), Validated<VulkanError>> {
@@ -576,7 +572,7 @@ where
     }
 
     unsafe fn signal_finished(&self) {
-        (**self).signal_finished()
+        unsafe { (**self).signal_finished() }
     }
 
     fn queue_change_allowed(&self) -> bool {

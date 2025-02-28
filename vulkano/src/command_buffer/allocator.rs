@@ -343,7 +343,7 @@ unsafe impl<T: CommandBufferAllocator> CommandBufferAllocator for Arc<T> {
 
     #[inline]
     unsafe fn deallocate(&self, allocation: CommandBufferAlloc) {
-        (**self).deallocate(allocation)
+        unsafe { (**self).deallocate(allocation) }
     }
 }
 
@@ -552,6 +552,14 @@ pub struct StandardCommandBufferAllocatorCreateInfo {
 impl Default for StandardCommandBufferAllocatorCreateInfo {
     #[inline]
     fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl StandardCommandBufferAllocatorCreateInfo {
+    /// Returns a default `StandardCommandBufferAllocatorCreateInfo`.
+    #[inline]
+    pub const fn new() -> Self {
         StandardCommandBufferAllocatorCreateInfo {
             primary_buffer_count: 32,
             secondary_buffer_count: 0,

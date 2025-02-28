@@ -35,8 +35,6 @@
 //! - Positive: **minification**. The rendered object is further from the viewer, and each pixel in
 //!   the texture corresponds to less than one framebuffer pixel.
 
-pub mod ycbcr;
-
 use self::ycbcr::SamplerYcbcrConversion;
 use crate::{
     device::{Device, DeviceOwned, DeviceOwnedDebugWrapper},
@@ -50,7 +48,10 @@ use crate::{
     pipeline::graphics::depth_stencil::CompareOp,
     Requires, RequiresAllOf, RequiresOneOf, Validated, ValidationError, VulkanError, VulkanObject,
 };
-use std::{mem::MaybeUninit, num::NonZeroU64, ops::RangeInclusive, ptr, sync::Arc};
+use ash::vk;
+use std::{mem::MaybeUninit, num::NonZero, ops::RangeInclusive, ptr, sync::Arc};
+
+pub mod ycbcr;
 
 /// Describes how to retrieve data from a sampled image within a shader.
 ///
@@ -89,9 +90,9 @@ use std::{mem::MaybeUninit, num::NonZeroU64, ops::RangeInclusive, ptr, sync::Arc
 /// ```
 #[derive(Debug)]
 pub struct Sampler {
-    handle: ash::vk::Sampler,
+    handle: vk::Sampler,
     device: InstanceOwnedDebugWrapper<Arc<Device>>,
-    id: NonZeroU64,
+    id: NonZero<u64>,
 
     address_mode: [SamplerAddressMode; 3],
     anisotropy: Option<f32>,
@@ -154,7 +155,7 @@ impl Sampler {
             unsafe { output.assume_init() }
         };
 
-        Ok(Self::from_handle(device, handle, create_info))
+        Ok(unsafe { Self::from_handle(device, handle, create_info) })
     }
 
     /// Creates a new `Sampler` from a raw object handle.
@@ -166,7 +167,7 @@ impl Sampler {
     #[inline]
     pub unsafe fn from_handle(
         device: Arc<Device>,
-        handle: ash::vk::Sampler,
+        handle: vk::Sampler,
         create_info: SamplerCreateInfo,
     ) -> Arc<Sampler> {
         let SamplerCreateInfo {
@@ -515,7 +516,7 @@ impl Drop for Sampler {
 }
 
 unsafe impl VulkanObject for Sampler {
-    type Handle = ash::vk::Sampler;
+    type Handle = vk::Sampler;
 
     #[inline]
     fn handle(&self) -> Self::Handle {
@@ -679,6 +680,14 @@ pub struct SamplerCreateInfo {
 impl Default for SamplerCreateInfo {
     #[inline]
     fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SamplerCreateInfo {
+    /// Returns a default `SamplerCreateInfo`.
+    #[inline]
+    pub const fn new() -> Self {
         Self {
             mag_filter: Filter::Nearest,
             min_filter: Filter::Nearest,
@@ -695,9 +704,7 @@ impl Default for SamplerCreateInfo {
             _ne: crate::NonExhaustive(()),
         }
     }
-}
 
-impl SamplerCreateInfo {
     /// Shortcut for creating a sampler with linear sampling, linear mipmaps, and with the repeat
     /// mode for borders.
     #[inline]
@@ -1056,7 +1063,7 @@ impl SamplerCreateInfo {
     pub(crate) fn to_vk<'a>(
         &self,
         extensions_vk: &'a mut SamplerCreateInfoExtensionsVk,
-    ) -> ash::vk::SamplerCreateInfo<'a> {
+    ) -> vk::SamplerCreateInfo<'a> {
         let &Self {
             mag_filter,
             min_filter,
@@ -1085,8 +1092,8 @@ impl SamplerCreateInfo {
             (false, CompareOp::Never)
         };
 
-        let mut val_vk = ash::vk::SamplerCreateInfo::default()
-            .flags(ash::vk::SamplerCreateFlags::empty())
+        let mut val_vk = vk::SamplerCreateInfo::default()
+            .flags(vk::SamplerCreateFlags::empty())
             .mag_filter(mag_filter.into())
             .min_filter(min_filter.into())
             .mipmap_mode(mipmap_mode.into())
@@ -1128,15 +1135,14 @@ impl SamplerCreateInfo {
 
         let reduction_mode_vk =
             (reduction_mode != SamplerReductionMode::WeightedAverage).then(|| {
-                ash::vk::SamplerReductionModeCreateInfo::default()
-                    .reduction_mode(reduction_mode.into())
+                vk::SamplerReductionModeCreateInfo::default().reduction_mode(reduction_mode.into())
             });
 
         let ycbcr_conversion_vk =
             sampler_ycbcr_conversion
                 .as_ref()
                 .map(|sampler_ycbcr_conversion| {
-                    ash::vk::SamplerYcbcrConversionInfo::default()
+                    vk::SamplerYcbcrConversionInfo::default()
                         .conversion(sampler_ycbcr_conversion.handle())
                 });
 
@@ -1148,12 +1154,12 @@ impl SamplerCreateInfo {
 }
 
 pub(crate) struct SamplerCreateInfoExtensionsVk {
-    pub(crate) reduction_mode_vk: Option<ash::vk::SamplerReductionModeCreateInfo<'static>>,
-    pub(crate) ycbcr_conversion_vk: Option<ash::vk::SamplerYcbcrConversionInfo<'static>>,
+    pub(crate) reduction_mode_vk: Option<vk::SamplerReductionModeCreateInfo<'static>>,
+    pub(crate) ycbcr_conversion_vk: Option<vk::SamplerYcbcrConversionInfo<'static>>,
 }
 
 /// A special value to indicate that the maximum LOD should not be clamped.
-pub const LOD_CLAMP_NONE: f32 = ash::vk::LOD_CLAMP_NONE;
+pub const LOD_CLAMP_NONE: f32 = vk::LOD_CLAMP_NONE;
 
 /// A mapping between components of a source format and components read by a shader.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
@@ -1171,8 +1177,13 @@ pub struct ComponentMapping {
 impl ComponentMapping {
     /// Creates a `ComponentMapping` with all components identity swizzled.
     #[inline]
-    pub fn identity() -> Self {
-        Self::default()
+    pub const fn identity() -> Self {
+        Self {
+            r: ComponentSwizzle::Identity,
+            g: ComponentSwizzle::Identity,
+            b: ComponentSwizzle::Identity,
+            a: ComponentSwizzle::Identity,
+        }
     }
 
     /// Returns `true` if all components are identity swizzled,
@@ -1281,10 +1292,10 @@ impl ComponentMapping {
     }
 
     #[allow(clippy::wrong_self_convention)]
-    pub(crate) fn to_vk(&self) -> ash::vk::ComponentMapping {
+    pub(crate) fn to_vk(&self) -> vk::ComponentMapping {
         let &Self { r, g, b, a } = self;
 
-        ash::vk::ComponentMapping {
+        vk::ComponentMapping {
             r: r.into(),
             g: g.into(),
             b: b.into(),

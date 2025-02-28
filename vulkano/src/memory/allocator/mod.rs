@@ -224,7 +224,7 @@ use crate::{
     instance::InstanceOwnedDebugWrapper,
     DeviceSize, Validated, Version, VulkanError,
 };
-use ash::vk::MAX_MEMORY_TYPES;
+use ash::vk::{self, MAX_MEMORY_TYPES};
 use parking_lot::{Mutex, MutexGuard};
 use slabbin::SlabAllocator;
 use std::{
@@ -679,7 +679,15 @@ pub struct AllocationCreateInfo {
 impl Default for AllocationCreateInfo {
     #[inline]
     fn default() -> Self {
-        AllocationCreateInfo {
+        Self::new()
+    }
+}
+
+impl AllocationCreateInfo {
+    /// Returns a default `AllocationCreateInfo`.
+    #[inline]
+    pub const fn new() -> Self {
+        Self {
             memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
             memory_type_bits: u32::MAX,
             allocate_preference: MemoryAllocatePreference::Unknown,
@@ -1119,7 +1127,7 @@ unsafe impl<S: Suballocator + Send + 'static> MemoryAllocator for GenericMemoryA
 
         self.pools
             .iter()
-            .map(|pool| ash::vk::MemoryPropertyFlags::from(pool.property_flags))
+            .map(|pool| vk::MemoryPropertyFlags::from(pool.property_flags))
             .enumerate()
             // Filter out memory types which are supported by the memory type bits and have the
             // required flags set.
@@ -1475,11 +1483,11 @@ unsafe impl<S: Suballocator + Send + 'static> MemoryAllocator for GenericMemoryA
             // memory and because a block isn't dropped until the allocator itself is dropped, at
             // which point it would be impossible to call this method. We also know that it must be
             // valid to create a reference to the block, because we locked the pool it belongs to.
-            let block = &mut *block_ptr;
+            let block = unsafe { &mut *block_ptr };
 
             // SAFETY: The caller must guarantee that `allocation` refers to a currently allocated
             // allocation of `self`.
-            block.deallocate(suballocation);
+            unsafe { block.deallocate(suballocation) };
         }
     }
 }
@@ -1534,7 +1542,7 @@ unsafe impl<T: MemoryAllocator> MemoryAllocator for Arc<T> {
     }
 
     unsafe fn deallocate(&self, allocation: MemoryAlloc) {
-        (**self).deallocate(allocation)
+        unsafe { (**self).deallocate(allocation) }
     }
 }
 
@@ -1626,7 +1634,7 @@ impl<S: Suballocator> DeviceMemoryBlock<S> {
     }
 
     unsafe fn deallocate(&mut self, suballocation: Suballocation) {
-        self.suballocator.deallocate(suballocation);
+        unsafe { self.suballocator.deallocate(suballocation) };
 
         self.allocation_count -= 1;
 
@@ -1865,7 +1873,15 @@ pub struct GenericMemoryAllocatorCreateInfo<'a> {
 impl Default for GenericMemoryAllocatorCreateInfo<'_> {
     #[inline]
     fn default() -> Self {
-        GenericMemoryAllocatorCreateInfo {
+        Self::new()
+    }
+}
+
+impl GenericMemoryAllocatorCreateInfo<'_> {
+    /// Returns a default `GenericMemoryAllocatorCreateInfo`.
+    #[inline]
+    pub const fn new() -> Self {
+        Self {
             block_sizes: &[],
             memory_type_bits: u32::MAX,
             dedicated_allocation: true,

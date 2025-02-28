@@ -99,7 +99,6 @@
 //!
 //! [`Instance`]: instance::Instance
 //! [`Surface`]: swapchain::Surface
-//! [`vulkano-win`]: https://crates.io/crates/vulkano-win
 //! [Enumerate the physical devices]: instance::Instance::enumerate_physical_devices
 //! [`PhysicalDevice`]: device::physical::PhysicalDevice
 //! [`Device`]: device::Device
@@ -120,7 +119,7 @@
 //! [`vulkano-macros`]: vulkano_macros
 //! [`serde`]: https://crates.io/crates/serde
 
-pub use ash::vk::Handle;
+use ash::vk;
 use bytemuck::{Pod, Zeroable};
 pub use extensions::ExtensionProperties;
 pub use half;
@@ -129,11 +128,12 @@ use std::{
     borrow::Cow,
     error::Error,
     fmt::{Debug, Display, Error as FmtError, Formatter},
-    num::NonZeroU64,
+    num::NonZero,
     ops::Deref,
     sync::Arc,
 };
 pub use version::Version;
+pub use vk::Handle;
 
 #[macro_use]
 mod tests;
@@ -168,16 +168,16 @@ pub mod sync;
 
 /// Represents memory size and offset values on a Vulkan device.
 /// Analogous to the Rust `usize` type on the host.
-pub use ash::vk::DeviceSize;
+pub use vk::DeviceSize;
 
 /// A [`DeviceSize`] that is known not to equal zero.
-pub type NonZeroDeviceSize = NonZeroU64;
+pub type NonZeroDeviceSize = NonZero<DeviceSize>;
 
 /// Represents an address (pointer) on a Vulkan device.
-pub use ash::vk::DeviceAddress;
+pub use vk::DeviceAddress;
 
 /// A [`DeviceAddress`] that is known not to equal zero.
-pub type NonNullDeviceAddress = NonZeroU64;
+pub type NonNullDeviceAddress = NonZero<DeviceAddress>;
 
 /// Represents a region of device addresses with a stride.
 #[derive(Debug, Copy, Clone, Default)]
@@ -189,8 +189,8 @@ pub struct StridedDeviceAddressRegion {
 
 impl StridedDeviceAddressRegion {
     #[doc(hidden)]
-    pub fn to_vk(&self) -> ash::vk::StridedDeviceAddressRegionKHR {
-        ash::vk::StridedDeviceAddressRegionKHR {
+    pub fn to_vk(&self) -> vk::StridedDeviceAddressRegionKHR {
+        vk::StridedDeviceAddressRegionKHR {
             device_address: self.device_address,
             stride: self.stride,
             size: self.size,
@@ -208,6 +208,7 @@ pub struct Packed24_8(u32);
 
 impl Packed24_8 {
     /// Returns a new `Packed24_8` value.
+    // TODO: make const
     #[inline]
     pub fn new(low_24: u32, high_8: u8) -> Self {
         Self((low_24 & 0x00ff_ffff) | (u32::from(high_8) << 24))
