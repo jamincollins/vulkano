@@ -38,16 +38,18 @@
 //!
 //! In all cases the number of viewports and scissor boxes must be the same.
 
-use crate::{device::Device, Requires, RequiresAllOf, RequiresOneOf, ValidationError, Version};
+use crate::{
+    device::Device, self_referential::self_referential, Requires, RequiresAllOf, RequiresOneOf,
+    ValidationError, Version,
+};
 use ash::vk;
-use smallvec::{smallvec, SmallVec};
-use std::ops::RangeInclusive;
+use smallvec::SmallVec;
 
 /// List of viewports and scissors that are used when creating a graphics pipeline object.
 ///
 /// Note that the number of viewports and scissors must be the same.
 #[derive(Clone, Debug)]
-pub struct ViewportState {
+pub struct ViewportState<'a> {
     /// Specifies the viewport transforms.
     ///
     /// When [`DynamicState::Viewport`] is used, the values of each viewport are ignored
@@ -63,7 +65,7 @@ pub struct ViewportState {
     ///
     /// [`DynamicState::Viewport`]: crate::pipeline::DynamicState::Viewport
     /// [`DynamicState::ViewportWithCount`]: crate::pipeline::DynamicState::ViewportWithCount
-    pub viewports: SmallVec<[Viewport; 1]>,
+    pub viewports: &'a [Viewport],
 
     /// Specifies the scissor rectangles.
     ///
@@ -80,58 +82,31 @@ pub struct ViewportState {
     ///
     /// [`DynamicState::Scissor`]: crate::pipeline::DynamicState::Scissor
     /// [`DynamicState::ScissorWithCount`]: crate::pipeline::DynamicState::ScissorWithCount
-    pub scissors: SmallVec<[Scissor; 1]>,
+    pub scissors: &'a [Scissor],
 
-    pub _ne: crate::NonExhaustive<'static>,
+    pub _ne: crate::NonExhaustive<'a>,
 }
 
-impl Default for ViewportState {
+impl Default for ViewportState<'_> {
     #[inline]
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl ViewportState {
+impl<'a> ViewportState<'a> {
     /// Returns a default `ViewportState`.
-    // TODO: make const
     #[inline]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
-            viewports: smallvec![Viewport::default()],
-            scissors: smallvec![Scissor::default()],
-            _ne: crate::NE,
-        }
-    }
-
-    /// Creates a `ViewportState` with fixed state from the given viewports and scissors.
-    #[deprecated(since = "0.34.0")]
-    pub fn viewport_fixed_scissor_fixed(
-        data: impl IntoIterator<Item = (Viewport, Scissor)>,
-    ) -> Self {
-        let (viewports, scissors) = data.into_iter().unzip();
-        Self {
-            viewports,
-            scissors,
-            _ne: crate::NE,
-        }
-    }
-
-    /// Creates a `ViewportState` with fixed state from the given viewports, and matching scissors
-    /// that cover the whole viewport.
-    #[deprecated(since = "0.34.0")]
-    pub fn viewport_fixed_scissor_irrelevant(data: impl IntoIterator<Item = Viewport>) -> Self {
-        let viewports: SmallVec<_> = data.into_iter().collect();
-        let scissors = smallvec![Scissor::default(); viewports.len()];
-        Self {
-            viewports,
-            scissors,
+            viewports: &[const { Viewport::new() }],
+            scissors: &[const { Scissor::new() }],
             _ne: crate::NE,
         }
     }
 
     pub(crate) fn validate(&self, device: &Device) -> Result<(), Box<ValidationError>> {
-        let Self {
+        let &Self {
             viewports,
             scissors,
             _ne: _,
@@ -223,7 +198,7 @@ impl ViewportState {
         Ok(())
     }
 
-    pub(crate) fn to_vk<'a>(
+    pub(crate) fn to_vk(
         &self,
         fields1_vk: &'a ViewportStateFields1Vk,
     ) -> vk::PipelineViewportStateCreateInfo<'a> {
@@ -247,7 +222,7 @@ impl ViewportState {
     }
 
     pub(crate) fn to_vk_fields1(&self) -> ViewportStateFields1Vk {
-        let Self {
+        let &Self {
             viewports,
             scissors,
             _ne: _,
@@ -261,11 +236,32 @@ impl ViewportState {
             scissors_vk,
         }
     }
+
+    pub(crate) fn to_owned(&self) -> OwnedViewportState {
+        let viewports = self.viewports.iter().cloned().collect();
+        let scissors = self.scissors.iter().cloned().collect();
+
+        OwnedViewportState::new(viewports, scissors, |viewports, scissors| ViewportState {
+            viewports,
+            scissors,
+            _ne: crate::NE,
+        })
+    }
 }
 
 pub(crate) struct ViewportStateFields1Vk {
     pub(crate) viewports_vk: SmallVec<[vk::Viewport; 2]>,
     pub(crate) scissors_vk: SmallVec<[vk::Rect2D; 2]>,
+}
+
+self_referential! {
+    mod owned_viewport_state {
+        pub(crate) struct OwnedViewportState {
+            inner: ViewportState<'_>,
+            viewports: SmallVec<[Viewport; 1]>,
+            scissors: SmallVec<[Scissor; 1]>,
+        }
+    }
 }
 
 /// State of a single viewport.
@@ -282,16 +278,27 @@ pub struct Viewport {
     /// using dynamic state.
     pub extent: [f32; 2],
 
-    /// Minimum and maximum values of the depth.
+    /// Minimum depth value.
     ///
-    /// The values `0.0` to `1.0` of each vertex's Z coordinate will be mapped to this
-    /// `depth_range` before being compared to the existing depth value.
+    /// The values `0.0` to `1.0` of each vertex's Z coordinate will be mapped to the range
+    /// \[`min_depth`,&nbsp;`max_depth`\] before being compared to the existing depth value.
     ///
-    /// This is equivalents to `glDepthRange` in OpenGL, except that OpenGL uses the Z coordinate
-    /// range from `-1.0` to `1.0` instead.
+    /// Together with `max_depth`, this is equivalent to `glDepthRange` in OpenGL, except that
+    /// OpenGL uses the Z coordinate range from `-1.0` to `1.0` instead.
     ///
-    /// The default value is `0.0..=1.0`.
-    pub depth_range: RangeInclusive<f32>,
+    /// The default value is `0.0`.
+    pub min_depth: f32,
+
+    /// Maximum depth value.
+    ///
+    /// The values `0.0` to `1.0` of each vertex's Z coordinate will be mapped to the range
+    /// \[`min_depth`,&nbsp;`max_depth`\] before being compared to the existing depth value.
+    ///
+    /// Together with `min_depth`, this is equivalent to `glDepthRange` in OpenGL, except that
+    /// OpenGL uses the Z coordinate range from `-1.0` to `1.0` instead.
+    ///
+    /// The default value is `1.0`.
+    pub max_depth: f32,
 }
 
 impl Default for Viewport {
@@ -308,7 +315,8 @@ impl Viewport {
         Self {
             offset: [0.0; 2],
             extent: [1.0; 2],
-            depth_range: 0.0..=1.0,
+            min_depth: 0.0,
+            max_depth: 1.0,
         }
     }
 
@@ -316,7 +324,8 @@ impl Viewport {
         let &Self {
             offset,
             extent,
-            ref depth_range,
+            min_depth,
+            max_depth,
         } = self;
 
         let properties = device.physical_device().properties();
@@ -419,9 +428,9 @@ impl Viewport {
         }
 
         if !device.enabled_extensions().ext_depth_range_unrestricted {
-            if *depth_range.start() < 0.0 || *depth_range.start() > 1.0 {
+            if !(0.0..=1.0).contains(&min_depth) {
                 return Err(Box::new(ValidationError {
-                    problem: "`depth_range.start` is not between 0.0 and 1.0 inclusive".into(),
+                    problem: "`min_depth` is not between 0.0 and 1.0 inclusive".into(),
                     requires_one_of: RequiresOneOf(&[RequiresAllOf(&[Requires::DeviceExtension(
                         "ext_depth_range_unrestricted",
                     )])]),
@@ -430,9 +439,9 @@ impl Viewport {
                 }));
             }
 
-            if *depth_range.end() < 0.0 || *depth_range.end() > 1.0 {
+            if !(0.0..=1.0).contains(&max_depth) {
                 return Err(Box::new(ValidationError {
-                    problem: "`depth_range.end` is not between 0.0 and 1.0 inclusive".into(),
+                    problem: "`max_depth` is not between 0.0 and 1.0 inclusive".into(),
                     requires_one_of: RequiresOneOf(&[RequiresAllOf(&[Requires::DeviceExtension(
                         "ext_depth_range_unrestricted",
                     )])]),
@@ -450,7 +459,8 @@ impl Viewport {
         let &Self {
             offset,
             extent,
-            ref depth_range,
+            min_depth,
+            max_depth,
         } = self;
 
         vk::Viewport {
@@ -458,8 +468,8 @@ impl Viewport {
             y: offset[1],
             width: extent[0],
             height: extent[1],
-            min_depth: *depth_range.start(),
-            max_depth: *depth_range.end(),
+            min_depth,
+            max_depth,
         }
     }
 }

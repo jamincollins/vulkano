@@ -10,7 +10,7 @@ use crate::{
     device::{Device, DeviceOwned, QueueFlags},
     format::{ClearColorValue, ClearValue, NumericType},
     image::{view::ImageView, ImageAspects, ImageLayout, ImageUsage, SampleCount},
-    pipeline::graphics::subpass::PipelineRenderingCreateInfo,
+    pipeline::graphics::subpass::OwnedPipelineRenderingCreateInfo,
     render_pass::{
         AttachmentDescription, AttachmentLoadOp, AttachmentStoreOp, Framebuffer, RenderPass,
         ResolveMode, SubpassDescription,
@@ -20,7 +20,7 @@ use crate::{
 };
 use ash::vk;
 use smallvec::SmallVec;
-use std::{cmp::min, ops::Range, sync::Arc};
+use std::{cmp::min, sync::Arc};
 
 /// # Commands for render passes.
 ///
@@ -91,13 +91,13 @@ impl<L> AutoCommandBufferBuilder<L> {
             _ne: _,
         } = &render_pass_begin_info;
 
-        let subpass = render_pass.clone().first_subpass();
+        let subpass = render_pass.first_subpass();
         self.builder_state.render_pass = Some(RenderPassState {
             contents: subpass_begin_info.contents,
             render_area_offset,
             render_area_extent,
 
-            rendering_info: PipelineRenderingCreateInfo::from_subpass(&subpass),
+            rendering_info: OwnedPipelineRenderingCreateInfo::from_subpass(&subpass),
             attachments: Some(RenderPassStateAttachments::from_subpass(
                 &subpass,
                 framebuffer,
@@ -124,7 +124,7 @@ impl<L> AutoCommandBufferBuilder<L> {
                         ResourceInCommand::FramebufferAttachment { index }.into(),
                         Resource::Image {
                             image: image_view.image().clone(),
-                            subresource_range: image_view.subresource_range().clone(),
+                            subresource_range: *image_view.subresource_range(),
                             // TODO: suboptimal
                             memory_access: PipelineStageAccessFlags::FragmentShader_InputAttachmentRead
                                 | PipelineStageAccessFlags::ColorAttachmentOutput_ColorAttachmentRead
@@ -226,13 +226,13 @@ impl<L> AutoCommandBufferBuilder<L> {
         begin_render_pass_state.subpass.next_subpass();
         render_pass_state.contents = subpass_begin_info.contents;
         render_pass_state.rendering_info =
-            PipelineRenderingCreateInfo::from_subpass(&begin_render_pass_state.subpass);
+            OwnedPipelineRenderingCreateInfo::from_subpass(&begin_render_pass_state.subpass);
         render_pass_state.attachments = Some(RenderPassStateAttachments::from_subpass(
             &begin_render_pass_state.subpass,
             begin_render_pass_state.framebuffer.as_ref().unwrap(),
         ));
 
-        if render_pass_state.rendering_info.view_mask != 0 {
+        if render_pass_state.rendering_info.as_ref().view_mask != 0 {
             // When multiview is enabled, at the beginning of each subpass, all
             // non-render pass state is undefined.
             self.builder_state.reset_non_render_pass_states();
@@ -388,7 +388,7 @@ impl<L> AutoCommandBufferBuilder<L> {
             render_area_offset,
             render_area_extent,
 
-            rendering_info: PipelineRenderingCreateInfo::from_rendering_info(&rendering_info),
+            rendering_info: OwnedPipelineRenderingCreateInfo::from_rendering_info(&rendering_info),
             attachments: Some(RenderPassStateAttachments::from_rendering_info(
                 &rendering_info,
             )),
@@ -425,7 +425,7 @@ impl<L> AutoCommandBufferBuilder<L> {
                             ResourceInCommand::ColorAttachment { index }.into(),
                             Resource::Image {
                                 image: image_view.image().clone(),
-                                subresource_range: image_view.subresource_range().clone(),
+                                subresource_range: *image_view.subresource_range(),
                                 // TODO: suboptimal
                                 memory_access: PipelineStageAccessFlags::ColorAttachmentOutput_ColorAttachmentRead
                                     | PipelineStageAccessFlags::ColorAttachmentOutput_ColorAttachmentWrite,
@@ -444,7 +444,7 @@ impl<L> AutoCommandBufferBuilder<L> {
                                 ResourceInCommand::ColorResolveAttachment { index }.into(),
                                 Resource::Image {
                                     image: image_view.image().clone(),
-                                    subresource_range: image_view.subresource_range().clone(),
+                                    subresource_range: *image_view.subresource_range(),
                                     // TODO: suboptimal
                                     memory_access: PipelineStageAccessFlags::ColorAttachmentOutput_ColorAttachmentRead
                                         | PipelineStageAccessFlags::ColorAttachmentOutput_ColorAttachmentWrite,
@@ -473,7 +473,7 @@ impl<L> AutoCommandBufferBuilder<L> {
                         ResourceInCommand::DepthStencilAttachment.into(),
                         Resource::Image {
                             image: image_view.image().clone(),
-                            subresource_range: image_view.subresource_range().clone(),
+                            subresource_range: *image_view.subresource_range(),
                             // TODO: suboptimal
                             memory_access: PipelineStageAccessFlags::EarlyFragmentTests_DepthStencilAttachmentRead
                                 | PipelineStageAccessFlags::EarlyFragmentTests_DepthStencilAttachmentWrite
@@ -494,7 +494,7 @@ impl<L> AutoCommandBufferBuilder<L> {
                             ResourceInCommand::DepthStencilResolveAttachment.into(),
                             Resource::Image {
                                 image: image_view.image().clone(),
-                                subresource_range: image_view.subresource_range().clone(),
+                                subresource_range: *image_view.subresource_range(),
                                 // TODO: suboptimal
                                 memory_access: PipelineStageAccessFlags::EarlyFragmentTests_DepthStencilAttachmentRead
                                     | PipelineStageAccessFlags::EarlyFragmentTests_DepthStencilAttachmentWrite
@@ -525,7 +525,7 @@ impl<L> AutoCommandBufferBuilder<L> {
                         ResourceInCommand::DepthStencilAttachment.into(),
                         Resource::Image {
                             image: image_view.image().clone(),
-                            subresource_range: image_view.subresource_range().clone(),
+                            subresource_range: *image_view.subresource_range(),
                             // TODO: suboptimal
                             memory_access: PipelineStageAccessFlags::EarlyFragmentTests_DepthStencilAttachmentRead
                                 | PipelineStageAccessFlags::EarlyFragmentTests_DepthStencilAttachmentWrite
@@ -546,7 +546,7 @@ impl<L> AutoCommandBufferBuilder<L> {
                             ResourceInCommand::DepthStencilResolveAttachment.into(),
                             Resource::Image {
                                 image: image_view.image().clone(),
-                                subresource_range: image_view.subresource_range().clone(),
+                                subresource_range: *image_view.subresource_range(),
                                 // TODO: suboptimal
                                 memory_access: PipelineStageAccessFlags::EarlyFragmentTests_DepthStencilAttachmentRead
                                     | PipelineStageAccessFlags::EarlyFragmentTests_DepthStencilAttachmentWrite
@@ -695,6 +695,7 @@ impl<L> AutoCommandBufferBuilder<L> {
                 } => {
                     let attachment_format = *render_pass_state
                         .rendering_info
+                        .as_ref()
                         .color_attachment_formats
                         .get(color_attachment as usize)
                         .ok_or_else(|| {
@@ -741,8 +742,7 @@ impl<L> AutoCommandBufferBuilder<L> {
 
                     // We only know the layer count if we have a known attachment image.
                     if let Some(image_view) = image_view {
-                        let array_layers = &image_view.subresource_range().array_layers;
-                        layer_count = min(layer_count, array_layers.end - array_layers.start);
+                        layer_count = min(layer_count, image_view.subresource_range().layer_count);
                     }
                 }
                 ClearAttachment::Depth(_)
@@ -753,6 +753,7 @@ impl<L> AutoCommandBufferBuilder<L> {
                         ClearAttachment::Depth(_) | ClearAttachment::DepthStencil(_)
                     ) && render_pass_state
                         .rendering_info
+                        .as_ref()
                         .depth_attachment_format
                         .is_none()
                     {
@@ -774,6 +775,7 @@ impl<L> AutoCommandBufferBuilder<L> {
                         ClearAttachment::Stencil(_) | ClearAttachment::DepthStencil(_)
                     ) && render_pass_state
                         .rendering_info
+                        .as_ref()
                         .stencil_attachment_format
                         .is_none()
                     {
@@ -798,8 +800,7 @@ impl<L> AutoCommandBufferBuilder<L> {
 
                     // We only know the layer count if we have a known attachment image.
                     if let Some(image_view) = image_view {
-                        let array_layers = &image_view.subresource_range().array_layers;
-                        layer_count = min(layer_count, array_layers.end - array_layers.start);
+                        layer_count = min(layer_count, image_view.subresource_range().layer_count);
                     }
                 }
             }
@@ -842,12 +843,16 @@ impl<L> AutoCommandBufferBuilder<L> {
                 }
             }
 
-            if rect.array_layers.end > layer_count {
+            if !rect
+                .base_array_layer
+                .checked_add(rect.layer_count)
+                .is_some_and(|end| end <= layer_count)
+            {
                 return Err(Box::new(ValidationError {
                     problem: format!(
-                        "`rects[{}].array_layers.end` is greater than the number of \
-                        array layers in the current render pass instance",
-                        rect_index
+                        "`rects[{0}].base_array_layer + rects[{0}].layer_count` is greater than \
+                        the number of array layers in the current render pass instance",
+                        rect_index,
                     )
                     .into(),
                     vuids: &["VUID-vkCmdClearAttachments-pRects-06937"],
@@ -855,12 +860,14 @@ impl<L> AutoCommandBufferBuilder<L> {
                 }));
             }
 
-            if render_pass_state.rendering_info.view_mask != 0 && rect.array_layers != (0..1) {
+            if render_pass_state.rendering_info.as_ref().view_mask != 0
+                && !(rect.base_array_layer == 0 && rect.layer_count == 1)
+            {
                 return Err(Box::new(ValidationError {
                     problem: format!(
                         "the current render pass instance has a non-zero `view_mask`, but \
-                        `rects[{}].array_layers` is not `0..1`",
-                        rect_index
+                        `(rects[{0}].base_array_layer, rects[{0}].layer_count)` is not `(0, 1)`",
+                        rect_index,
                     )
                     .into(),
                     vuids: &["VUID-vkCmdClearAttachments-baseArrayLayer-00018"],
@@ -1084,7 +1091,7 @@ impl RecordingCommandBuffer {
         }
 
         for subpass_desc in render_pass.subpasses() {
-            let SubpassDescription {
+            let &SubpassDescription {
                 flags: _,
                 view_mask: _,
                 input_attachments,
@@ -1100,11 +1107,11 @@ impl RecordingCommandBuffer {
 
             for atch_ref in input_attachments
                 .iter()
+                .chain(color_attachments.iter())
+                .chain(color_resolve_attachments.iter())
+                .chain(depth_stencil_attachment.into_iter())
+                .chain(depth_stencil_resolve_attachment.into_iter())
                 .flatten()
-                .chain(color_attachments.iter().flatten())
-                .chain(color_resolve_attachments.iter().flatten())
-                .chain(depth_stencil_attachment.iter())
-                .chain(depth_stencil_resolve_attachment.iter())
             {
                 let image_view = &framebuffer.attachments()[atch_ref.attachment as usize];
 
@@ -1625,7 +1632,8 @@ impl RecordingCommandBuffer {
             let &ClearRect {
                 offset: _,
                 extent,
-                ref array_layers,
+                base_array_layer: _,
+                layer_count,
             } = rect;
 
             if extent[0] == 0 {
@@ -1646,10 +1654,10 @@ impl RecordingCommandBuffer {
                 }));
             }
 
-            if array_layers.is_empty() {
+            if layer_count == 0 {
                 return Err(Box::new(ValidationError {
-                    context: format!("rects[{}].array_layers", rect_index).into(),
-                    problem: "is empty".into(),
+                    context: format!("rects[{}].layer_count", rect_index).into(),
+                    problem: "is zero".into(),
                     vuids: &["VUID-vkCmdClearAttachments-layerCount-01934"],
                     ..Default::default()
                 }));
@@ -2154,8 +2162,7 @@ impl RenderingInfo {
                 })
             {
                 let image_view_extent = image_view.image().extent();
-                let image_view_array_layers =
-                    image_view.subresource_range().array_layers.len() as u32;
+                let image_view_array_layers = image_view.subresource_range().layer_count;
 
                 auto_extent[0] = auto_extent[0].min(image_view_extent[0]);
                 auto_extent[1] = auto_extent[1].min(image_view_extent[1]);
@@ -3326,8 +3333,11 @@ pub struct ClearRect {
     /// The width and height of the rectangle.
     pub extent: [u32; 2],
 
-    /// The range of array layers to be cleared.
-    pub array_layers: Range<u32>,
+    /// The first array layer to be cleared.
+    pub base_array_layer: u32,
+
+    /// The number of array layers to be cleared.
+    pub layer_count: u32,
 }
 
 impl ClearRect {
@@ -3336,7 +3346,8 @@ impl ClearRect {
         let &Self {
             offset,
             extent,
-            ref array_layers,
+            base_array_layer,
+            layer_count,
         } = self;
 
         vk::ClearRect {
@@ -3350,8 +3361,8 @@ impl ClearRect {
                     height: extent[1],
                 },
             },
-            base_array_layer: array_layers.start,
-            layer_count: array_layers.end - array_layers.start,
+            base_array_layer,
+            layer_count,
         }
     }
 }

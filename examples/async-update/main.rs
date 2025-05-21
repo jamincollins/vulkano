@@ -431,25 +431,20 @@ impl ApplicationHandler for App {
                 .unwrap()
         };
 
-        let vs = vs::load(self.device.clone())
-            .unwrap()
-            .entry_point("main")
-            .unwrap();
-        let fs = fs::load(self.device.clone())
-            .unwrap()
-            .entry_point("main")
-            .unwrap();
+        let vs = vs::load(&self.device).unwrap().entry_point("main").unwrap();
+        let fs = fs::load(&self.device).unwrap().entry_point("main").unwrap();
         let vertex_input_state = MyVertex::per_vertex().definition(&vs).unwrap();
         let stages = [
-            PipelineShaderStageCreateInfo::new(vs),
-            PipelineShaderStageCreateInfo::new(fs),
+            PipelineShaderStageCreateInfo::new(&vs),
+            PipelineShaderStageCreateInfo::new(&fs),
         ];
         let layout = bcx.pipeline_layout_from_stages(&stages).unwrap();
 
         let viewport = Viewport {
             offset: [0.0, 0.0],
             extent: window_size.into(),
-            depth_range: 0.0..=1.0,
+            min_depth: 0.0,
+            max_depth: 1.0,
         };
 
         let sampler_id = bcx
@@ -531,25 +526,25 @@ impl ApplicationHandler for App {
         let subpass = node.subpass().unwrap().clone();
 
         let pipeline = GraphicsPipeline::new(
-            self.device.clone(),
+            &self.device,
             None,
-            GraphicsPipelineCreateInfo {
-                stages: stages.into_iter().collect(),
-                vertex_input_state: Some(vertex_input_state),
-                input_assembly_state: Some(InputAssemblyState {
+            &GraphicsPipelineCreateInfo {
+                stages: &stages,
+                vertex_input_state: Some(&vertex_input_state),
+                input_assembly_state: Some(&InputAssemblyState {
                     topology: PrimitiveTopology::TriangleStrip,
                     ..Default::default()
                 }),
-                viewport_state: Some(ViewportState::default()),
-                rasterization_state: Some(RasterizationState::default()),
-                multisample_state: Some(MultisampleState::default()),
-                color_blend_state: Some(ColorBlendState::with_attachment_states(
-                    subpass.num_color_attachments(),
-                    ColorBlendAttachmentState::default(),
-                )),
-                dynamic_state: [DynamicState::Viewport].into_iter().collect(),
-                subpass: Some(subpass.into()),
-                ..GraphicsPipelineCreateInfo::new(layout)
+                viewport_state: Some(&ViewportState::default()),
+                rasterization_state: Some(&RasterizationState::default()),
+                multisample_state: Some(&MultisampleState::default()),
+                color_blend_state: Some(&ColorBlendState {
+                    attachments: &[ColorBlendAttachmentState::default()],
+                    ..Default::default()
+                }),
+                dynamic_state: &[DynamicState::Viewport],
+                subpass: Some((&subpass).into()),
+                ..GraphicsPipelineCreateInfo::new(&layout)
             },
         )
         .unwrap();
@@ -723,7 +718,7 @@ struct RenderTask {
 impl Task for RenderTask {
     type World = RenderContext;
 
-    fn clear_values(&self, clear_values: &mut ClearValues<'_>) {
+    fn clear_values(&self, clear_values: &mut ClearValues<'_>, _world: &Self::World) {
         clear_values.set(self.swapchain_id.current_image_id(), [0.0; 4]);
     }
 
@@ -971,7 +966,8 @@ impl Task for UploadTask {
                 image_subresource: ImageSubresourceLayers {
                     aspects: ImageAspects::COLOR,
                     mip_level: 0,
-                    array_layers: 0..1,
+                    base_array_layer: 0,
+                    layer_count: 1,
                 },
                 image_offset: CORNER_OFFSETS[current_corner % 4],
                 image_extent: [TRANSFER_GRANULARITY, TRANSFER_GRANULARITY, 1],
@@ -988,7 +984,8 @@ impl Task for UploadTask {
                     image_subresource: ImageSubresourceLayers {
                         aspects: ImageAspects::COLOR,
                         mip_level: 0,
-                        array_layers: 0..1,
+                        base_array_layer: 0,
+                        layer_count: 1,
                     },
                     image_offset: CORNER_OFFSETS[(current_corner - 1) % 4],
                     image_extent: [TRANSFER_GRANULARITY, TRANSFER_GRANULARITY, 1],

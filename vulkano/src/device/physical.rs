@@ -2,7 +2,7 @@ use super::QueueFamilyProperties;
 use crate::{
     buffer::{ExternalBufferInfo, ExternalBufferProperties},
     cache::{OnceCache, WeakArcOnceCache},
-    device::{properties::DeviceProperties, DeviceExtensions, DeviceFeatures, DeviceFeaturesFfi},
+    device::{properties::DeviceProperties, DeviceExtensions, DeviceFeatures},
     display::{Display, DisplayPlaneProperties, DisplayPlanePropertiesRaw, DisplayProperties},
     format::{Format, FormatProperties},
     image::{
@@ -76,8 +76,9 @@ pub struct PhysicalDevice {
     display_properties: WeakArcOnceCache<vk::DisplayKHR, Display>,
     display_plane_properties: RwLock<Vec<DisplayPlanePropertiesRaw>>,
     external_buffer_properties: OnceCache<ExternalBufferInfo<'static>, ExternalBufferProperties>,
-    external_fence_properties: OnceCache<ExternalFenceInfo, ExternalFenceProperties>,
-    external_semaphore_properties: OnceCache<ExternalSemaphoreInfo, ExternalSemaphoreProperties>,
+    external_fence_properties: OnceCache<ExternalFenceInfo<'static>, ExternalFenceProperties>,
+    external_semaphore_properties:
+        OnceCache<ExternalSemaphoreInfo<'static>, ExternalSemaphoreProperties>,
     format_properties: OnceCache<Format, FormatProperties>,
     image_format_properties: OnceCache<OwnedImageFormatInfo, Option<ImageFormatProperties>>,
     sparse_image_format_properties:
@@ -207,14 +208,12 @@ impl PhysicalDevice {
     }
 
     unsafe fn get_features(handle: vk::PhysicalDevice, instance: &Instance) -> DeviceFeatures {
-        let mut output = DeviceFeaturesFfi::default();
+        let mut features_vk = DeviceFeatures::to_mut_vk();
 
         let fns = instance.fns();
-        unsafe {
-            (fns.v1_0.get_physical_device_features)(handle, &mut output.head_as_mut().features)
-        };
+        unsafe { (fns.v1_0.get_physical_device_features)(handle, &mut features_vk) };
 
-        DeviceFeatures::from(&output)
+        DeviceFeatures::from_vk(&features_vk)
     }
 
     unsafe fn get_features2(
@@ -223,25 +222,35 @@ impl PhysicalDevice {
         api_version: Version,
         supported_extensions: &DeviceExtensions,
     ) -> DeviceFeatures {
-        let mut output = DeviceFeaturesFfi::default();
-        output.make_chain(
+        let fns = instance.fns();
+
+        let call = |features_vk: &mut vk::PhysicalDeviceFeatures2<'_>| {
+            if instance.api_version() >= Version::V1_1 {
+                unsafe { (fns.v1_1.get_physical_device_features2)(handle, features_vk) };
+            } else {
+                unsafe {
+                    (fns.khr_get_physical_device_properties2
+                        .get_physical_device_features2_khr)(handle, features_vk)
+                };
+            }
+        };
+
+        let mut features2_extensions_vk = DeviceFeatures::to_mut_vk2_extensions(
             api_version,
             supported_extensions,
             instance.enabled_extensions(),
         );
+        let mut features2_vk = DeviceFeatures::to_mut_vk2(&mut features2_extensions_vk);
 
-        let fns = instance.fns();
+        call(&mut features2_vk);
 
-        if instance.api_version() >= Version::V1_1 {
-            unsafe { (fns.v1_1.get_physical_device_features2)(handle, output.head_as_mut()) };
-        } else {
-            unsafe {
-                (fns.khr_get_physical_device_properties2
-                    .get_physical_device_features2_khr)(handle, output.head_as_mut())
-            };
-        }
+        // Unborrow
+        let features2_vk = vk::PhysicalDeviceFeatures2 {
+            _marker: PhantomData,
+            ..features2_vk
+        };
 
-        DeviceFeatures::from(&output)
+        DeviceFeatures::from_vk2(&features2_vk, &features2_extensions_vk)
     }
 
     unsafe fn get_properties(handle: vk::PhysicalDevice, instance: &Instance) -> DeviceProperties {
@@ -560,7 +569,7 @@ impl PhysicalDevice {
                     self.display_properties
                         .get_or_insert(properties_vk.display, |&handle| {
                             Display::from_handle(
-                                self.clone(),
+                                self,
                                 handle,
                                 DisplayProperties::from_vk(properties_vk),
                             )
@@ -605,7 +614,7 @@ impl PhysicalDevice {
                     self.display_properties
                         .get_or_insert(properties_vk.display, |&handle| {
                             Display::from_handle(
-                                self.clone(),
+                                self,
                                 handle,
                                 DisplayProperties::from_vk(properties_vk),
                             )
@@ -992,16 +1001,16 @@ impl PhysicalDevice {
     #[inline]
     pub fn external_fence_properties(
         &self,
-        info: ExternalFenceInfo,
+        info: &ExternalFenceInfo<'_>,
     ) -> Result<ExternalFenceProperties, Box<ValidationError>> {
-        self.validate_external_fence_properties(&info)?;
+        self.validate_external_fence_properties(info)?;
 
         Ok(unsafe { self.external_fence_properties_unchecked(info) })
     }
 
     fn validate_external_fence_properties(
         &self,
-        info: &ExternalFenceInfo,
+        info: &ExternalFenceInfo<'_>,
     ) -> Result<(), Box<ValidationError>> {
         if !(self.instance.api_version() >= Version::V1_1
             || self
@@ -1029,45 +1038,46 @@ impl PhysicalDevice {
     #[inline]
     pub unsafe fn external_fence_properties_unchecked(
         &self,
-        info: ExternalFenceInfo,
+        info: &ExternalFenceInfo<'_>,
     ) -> ExternalFenceProperties {
-        self.external_fence_properties.get_or_insert(&info, || {
-            /* Input */
+        self.external_fence_properties
+            .get_or_insert(info.wrap(), || {
+                /* Input */
 
-            let info_vk = info.to_vk();
+                let info_vk = info.to_vk();
 
-            /* Output */
+                /* Output */
 
-            let mut properties_vk = ExternalFenceProperties::to_mut_vk();
+                let mut properties_vk = ExternalFenceProperties::to_mut_vk();
 
-            /* Call */
+                /* Call */
 
-            let fns = self.instance.fns();
+                let fns = self.instance.fns();
 
-            if self.instance.api_version() >= Version::V1_1 {
-                unsafe {
-                    (fns.v1_1.get_physical_device_external_fence_properties)(
-                        self.handle,
-                        &info_vk,
-                        &mut properties_vk,
-                    )
+                if self.instance.api_version() >= Version::V1_1 {
+                    unsafe {
+                        (fns.v1_1.get_physical_device_external_fence_properties)(
+                            self.handle,
+                            &info_vk,
+                            &mut properties_vk,
+                        )
+                    }
+                } else {
+                    unsafe {
+                        (fns.khr_external_fence_capabilities
+                            .get_physical_device_external_fence_properties_khr)(
+                            self.handle,
+                            &info_vk,
+                            &mut properties_vk,
+                        )
+                    };
                 }
-            } else {
-                unsafe {
-                    (fns.khr_external_fence_capabilities
-                        .get_physical_device_external_fence_properties_khr)(
-                        self.handle,
-                        &info_vk,
-                        &mut properties_vk,
-                    )
-                };
-            }
 
-            (
-                info.clone(),
-                ExternalFenceProperties::from_vk(&properties_vk),
-            )
-        })
+                (
+                    info.to_owned(),
+                    ExternalFenceProperties::from_vk(&properties_vk),
+                )
+            })
     }
 
     /// Retrieves the external handle properties supported for semaphores with a given
@@ -1083,16 +1093,16 @@ impl PhysicalDevice {
     #[inline]
     pub fn external_semaphore_properties(
         &self,
-        info: ExternalSemaphoreInfo,
+        info: &ExternalSemaphoreInfo<'_>,
     ) -> Result<ExternalSemaphoreProperties, Box<ValidationError>> {
-        self.validate_external_semaphore_properties(&info)?;
+        self.validate_external_semaphore_properties(info)?;
 
         Ok(unsafe { self.external_semaphore_properties_unchecked(info) })
     }
 
     fn validate_external_semaphore_properties(
         &self,
-        info: &ExternalSemaphoreInfo,
+        info: &ExternalSemaphoreInfo<'_>,
     ) -> Result<(), Box<ValidationError>> {
         if !(self.instance.api_version() >= Version::V1_1
             || self
@@ -1120,46 +1130,47 @@ impl PhysicalDevice {
     #[inline]
     pub unsafe fn external_semaphore_properties_unchecked(
         &self,
-        info: ExternalSemaphoreInfo,
+        info: &ExternalSemaphoreInfo<'_>,
     ) -> ExternalSemaphoreProperties {
-        self.external_semaphore_properties.get_or_insert(&info, || {
-            /* Input */
+        self.external_semaphore_properties
+            .get_or_insert(info.wrap(), || {
+                /* Input */
 
-            let mut info_extensions_vk = info.to_vk_extensions();
-            let info_vk = info.to_vk(&mut info_extensions_vk);
+                let mut info_extensions_vk = info.to_vk_extensions();
+                let info_vk = info.to_vk(&mut info_extensions_vk);
 
-            /* Output */
+                /* Output */
 
-            let mut properties_vk = ExternalSemaphoreProperties::to_mut_vk();
+                let mut properties_vk = ExternalSemaphoreProperties::to_mut_vk();
 
-            /* Call */
+                /* Call */
 
-            let fns = self.instance.fns();
+                let fns = self.instance.fns();
 
-            if self.instance.api_version() >= Version::V1_1 {
-                unsafe {
-                    (fns.v1_1.get_physical_device_external_semaphore_properties)(
-                        self.handle,
-                        &info_vk,
-                        &mut properties_vk,
-                    )
+                if self.instance.api_version() >= Version::V1_1 {
+                    unsafe {
+                        (fns.v1_1.get_physical_device_external_semaphore_properties)(
+                            self.handle,
+                            &info_vk,
+                            &mut properties_vk,
+                        )
+                    }
+                } else {
+                    unsafe {
+                        (fns.khr_external_semaphore_capabilities
+                            .get_physical_device_external_semaphore_properties_khr)(
+                            self.handle,
+                            &info_vk,
+                            &mut properties_vk,
+                        )
+                    };
                 }
-            } else {
-                unsafe {
-                    (fns.khr_external_semaphore_capabilities
-                        .get_physical_device_external_semaphore_properties_khr)(
-                        self.handle,
-                        &info_vk,
-                        &mut properties_vk,
-                    )
-                };
-            }
 
-            (
-                info.clone(),
-                ExternalSemaphoreProperties::from_vk(&properties_vk),
-            )
-        })
+                (
+                    info.to_owned(),
+                    ExternalSemaphoreProperties::from_vk(&properties_vk),
+                )
+            })
     }
 
     /// Retrieves the properties of a format when used by this physical device.

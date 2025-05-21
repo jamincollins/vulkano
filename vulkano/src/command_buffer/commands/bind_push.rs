@@ -93,7 +93,9 @@ impl<L> AutoCommandBufferBuilder<L> {
             let mut dynamic_offsets_remaining = dynamic_offsets;
             let mut required_dynamic_offset_count = 0;
 
-            for (&binding_num, binding) in set_layout.bindings() {
+            for binding in set_layout.bindings() {
+                let binding_num = binding.binding;
+
                 let required_alignment = match binding.descriptor_type {
                     DescriptorType::UniformBufferDynamic => {
                         properties.min_uniform_buffer_offset_alignment
@@ -126,10 +128,10 @@ impl<L> AutoCommandBufferBuilder<L> {
                         _ => unreachable!(),
                     };
 
-                    for (index, (&offset, element)) in
+                    for (index, (&dynamic_offset, element)) in
                         dynamic_offsets.iter().zip(elements).enumerate()
                     {
-                        if !is_aligned(offset as DeviceSize, required_alignment) {
+                        if !is_aligned(dynamic_offset as DeviceSize, required_alignment) {
                             match binding.descriptor_type {
                                 DescriptorType::UniformBufferDynamic => {
                                     return Err(Box::new(ValidationError {
@@ -172,14 +174,22 @@ impl<L> AutoCommandBufferBuilder<L> {
                         }
 
                         if let Some(buffer_info) = element {
-                            let DescriptorBufferInfo { buffer, range } = buffer_info;
+                            let &DescriptorBufferInfo {
+                                ref buffer,
+                                offset,
+                                range,
+                            } = buffer_info;
 
-                            if offset as DeviceSize + range.end > buffer.size() {
+                            if !(dynamic_offset as DeviceSize)
+                                .checked_add(offset)
+                                .and_then(|x| x.checked_add(range))
+                                .is_some_and(|end| end <= buffer.size())
+                            {
                                 return Err(Box::new(ValidationError {
                                     problem: format!(
                                         "the dynamic offset of `descriptor_sets[{}]` \
                                         (for set number {}) for binding {} index {}, when \
-                                        added to `range.end` of the descriptor write, is \
+                                        added to `offset + range` of the descriptor write, is \
                                         greater than the size of the bound buffer",
                                         descriptor_sets_index, set_num, binding_num, index,
                                     )
@@ -682,7 +692,9 @@ impl RecordingCommandBuffer {
                 }));
             }
 
-            for (&binding_num, binding) in set_layout.bindings() {
+            for binding in set_layout.bindings() {
+                let binding_num = binding.binding;
+
                 let required_alignment = match binding.descriptor_type {
                     DescriptorType::UniformBufferDynamic => {
                         properties.min_uniform_buffer_offset_alignment
@@ -1585,11 +1597,13 @@ impl RecordingCommandBuffer {
             return self;
         }
 
-        let set_layout_bindings = &pipeline_layout.set_layouts()[set_num as usize].bindings();
+        let set_layout = &pipeline_layout.set_layouts()[set_num as usize];
         let writes_fields1_vk: SmallVec<[_; 8]> = descriptor_writes
             .iter()
             .map(|write| {
-                let default_image_layout = set_layout_bindings[&write.binding()]
+                let default_image_layout = set_layout
+                    .binding(write.binding())
+                    .unwrap()
                     .descriptor_type
                     .default_image_layout();
                 write.to_vk_fields1(default_image_layout)
@@ -1607,7 +1621,7 @@ impl RecordingCommandBuffer {
             .map(|((write, write_info_vk), write_extension_vk)| {
                 write.to_vk(
                     vk::DescriptorSet::null(),
-                    set_layout_bindings[&write.binding()].descriptor_type,
+                    set_layout.binding(write.binding()).unwrap().descriptor_type,
                     write_info_vk,
                     write_extension_vk,
                 )

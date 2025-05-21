@@ -225,7 +225,8 @@ impl ApplicationHandler for App {
         let viewport = Viewport {
             offset: [0.0, 0.0],
             extent: window_size.into(),
-            depth_range: 0.0..=1.0,
+            min_depth: 0.0,
+            max_depth: 1.0,
         };
 
         let (diffuse_image_id, normals_image_id, depth_image_id) =
@@ -372,14 +373,14 @@ impl ApplicationHandler for App {
             .task_mut()
             .downcast_mut::<SceneTask>()
             .unwrap()
-            .create_pipeline(self, subpass);
+            .create_pipeline(self, &subpass);
         let deferred_node = task_graph.task_node_mut(deferred_node_id).unwrap();
         let subpass = deferred_node.subpass().unwrap().clone();
         deferred_node
             .task_mut()
             .downcast_mut::<DeferredTask>()
             .unwrap()
-            .create_pipelines(self, subpass);
+            .create_pipelines(self, &subpass);
 
         self.rcx = Some(RenderContext {
             window,

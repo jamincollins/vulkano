@@ -745,49 +745,52 @@ unsafe fn create_framebuffers(
     framebuffers.reserve_exact(swapchain_image_counts.iter().product::<u32>() as usize);
 
     'outer: loop {
+        let attachments = attachments
+            .iter()
+            .map(|(&id, attachment)| {
+                let image = match id.object_type() {
+                    ObjectType::Image => {
+                        let image_id = unsafe { id.parametrize() };
+
+                        unsafe { resource_map.image_unchecked(image_id) }.image()
+                    }
+                    ObjectType::Swapchain => {
+                        let swapchain_id = unsafe { id.parametrize() };
+                        let swapchain_state =
+                            unsafe { resource_map.swapchain_unchecked(swapchain_id) };
+                        let i = swapchains.iter().position(|x| x.erase() == id).unwrap();
+                        let image_index = swapchain_image_indices[i];
+
+                        &swapchain_state.images()[image_index as usize]
+                    }
+                    _ => unreachable!(),
+                };
+
+                ImageView::new(
+                    image,
+                    &ImageViewCreateInfo {
+                        format: attachment.format,
+                        component_mapping: attachment.component_mapping,
+                        subresource_range: ImageSubresourceRange {
+                            aspects: attachment.format.aspects(),
+                            base_mip_level: attachment.mip_level,
+                            level_count: 1,
+                            base_array_layer: attachment.base_array_layer,
+                            // FIXME:
+                            layer_count: 1,
+                        },
+                        ..Default::default()
+                    },
+                )
+                // FIXME:
+                .map_err(Validated::unwrap)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
         let framebuffer = Framebuffer::new(
-            render_pass.clone(),
-            FramebufferCreateInfo {
-                attachments: attachments
-                    .iter()
-                    .map(|(&id, attachment)| {
-                        let image = match id.object_type() {
-                            ObjectType::Image => {
-                                let image_id = unsafe { id.parametrize() };
-
-                                unsafe { resource_map.image_unchecked(image_id) }.image()
-                            }
-                            ObjectType::Swapchain => {
-                                let swapchain_id = unsafe { id.parametrize() };
-                                let swapchain_state =
-                                    unsafe { resource_map.swapchain_unchecked(swapchain_id) };
-                                let i = swapchains.iter().position(|x| x.erase() == id).unwrap();
-                                let image_index = swapchain_image_indices[i];
-
-                                &swapchain_state.images()[image_index as usize]
-                            }
-                            _ => unreachable!(),
-                        };
-
-                        ImageView::new(
-                            image,
-                            &ImageViewCreateInfo {
-                                format: attachment.format,
-                                component_mapping: attachment.component_mapping,
-                                subresource_range: ImageSubresourceRange {
-                                    aspects: attachment.format.aspects(),
-                                    mip_levels: attachment.mip_level..attachment.mip_level + 1,
-                                    // FIXME:
-                                    array_layers: attachment.base_array_layer
-                                        ..attachment.base_array_layer + 1,
-                                },
-                                ..Default::default()
-                            },
-                        )
-                        // FIXME:
-                        .map_err(Validated::unwrap)
-                    })
-                    .collect::<Result<Vec<_>, _>>()?,
+            render_pass,
+            &FramebufferCreateInfo {
+                attachments: &attachments.iter().collect::<Vec<_>>(),
                 ..Default::default()
             },
         )
@@ -1195,6 +1198,7 @@ impl<'a, W: ?Sized + 'static> ExecuteState2<'a, W> {
             set_clear_values(
                 &self.executable.graph.nodes,
                 self.resource_map,
+                self.world,
                 render_pass_state,
                 &mut self.clear_values,
                 &mut self.clear_values_vk,
@@ -1274,6 +1278,7 @@ impl<'a, W: ?Sized + 'static> ExecuteState2<'a, W> {
             set_clear_attachments(
                 &self.executable.graph.nodes,
                 self.resource_map,
+                self.world,
                 node_index,
                 render_pass_state,
                 attachments,
@@ -1795,6 +1800,7 @@ impl<'a, W: ?Sized + 'static> ExecuteState<'a, W> {
             set_clear_values(
                 &self.executable.graph.nodes,
                 self.resource_map,
+                self.world,
                 render_pass_state,
                 &mut self.clear_values,
                 &mut self.clear_values_vk,
@@ -1874,6 +1880,7 @@ impl<'a, W: ?Sized + 'static> ExecuteState<'a, W> {
             set_clear_attachments(
                 &self.executable.graph.nodes,
                 self.resource_map,
+                self.world,
                 node_index,
                 render_pass_state,
                 attachments,
@@ -2082,9 +2089,10 @@ unsafe fn framebuffer_index(resource_map: &ResourceMap<'_>, swapchains: &[Id<Swa
     index as usize
 }
 
-unsafe fn set_clear_values(
-    nodes: &super::Nodes<impl ?Sized + 'static>,
+unsafe fn set_clear_values<W: ?Sized + 'static>(
+    nodes: &super::Nodes<W>,
     resource_map: &ResourceMap<'_>,
+    world: &W,
     render_pass_state: &super::RenderPassState,
     clear_values: &mut LinearMap<Id, Option<ClearValue>>,
     clear_values_vk: &mut Vec<vk::ClearValue>,
@@ -2101,10 +2109,13 @@ unsafe fn set_clear_values(
     for &node_index in &render_pass_state.clear_node_indices {
         let task_node = unsafe { nodes.task_node_unchecked(node_index) };
 
-        task_node.task.clear_values(&mut ClearValues {
-            inner: clear_values,
-            resource_map,
-        });
+        task_node.task.clear_values(
+            &mut ClearValues {
+                inner: clear_values,
+                resource_map,
+            },
+            world,
+        );
     }
 
     clear_values_vk.extend(clear_values.values().map(|clear_value| {
@@ -2114,9 +2125,10 @@ unsafe fn set_clear_values(
     }));
 }
 
-unsafe fn set_clear_attachments(
-    nodes: &super::Nodes<impl ?Sized + 'static>,
+unsafe fn set_clear_attachments<W: ?Sized + 'static>(
+    nodes: &super::Nodes<W>,
     resource_map: &ResourceMap<'_>,
+    world: &W,
     node_index: NodeIndex,
     render_pass_state: &super::RenderPassState,
     attachments: &[Id],
@@ -2129,10 +2141,13 @@ unsafe fn set_clear_attachments(
 
     let task_node = unsafe { nodes.task_node_unchecked(node_index) };
 
-    task_node.task.clear_values(&mut ClearValues {
-        inner: clear_values,
-        resource_map,
-    });
+    task_node.task.clear_values(
+        &mut ClearValues {
+            inner: clear_values,
+            resource_map,
+        },
+        world,
+    );
 
     clear_attachments_vk.extend(clear_values.iter().map(|(id, clear_value)| {
         let attachment_state = render_pass_state.attachments.get(id).unwrap();
@@ -2206,8 +2221,8 @@ impl<W: ?Sized + 'static> Drop for StateGuard<'_, W> {
         // SAFETY: The parameters are valid.
         match unsafe {
             Fence::new_unchecked(
-                device.clone(),
-                FenceCreateInfo {
+                device,
+                &FenceCreateInfo {
                     flags: FenceCreateFlags::SIGNALED,
                     ..Default::default()
                 },
@@ -2270,7 +2285,7 @@ impl<W: ?Sized + 'static> Drop for StateGuard<'_, W> {
         // semaphores are still signalled, so we have to recreate them.
         for semaphore in self.executable.semaphores.borrow_mut().iter_mut() {
             // SAFETY: The parameters are valid.
-            match unsafe { Semaphore::new_unchecked(device.clone(), Default::default()) } {
+            match unsafe { Semaphore::new_unchecked(device, &Default::default()) } {
                 Ok(new_semaphore) => {
                     *semaphore = new_semaphore;
                 }
@@ -2416,7 +2431,7 @@ impl<'a> ResourceMap<'a> {
         );
 
         let ptr = <*const _>::cast(state);
-        let is_duplicate = self.map.iter().any(|&p| p == ptr);
+        let is_duplicate = self.map.contains(&ptr);
 
         // SAFETY: We checked that `virtual_id` is present in `self.virtual_resources` above, and
         // since we initialized `self.map` with a length at least that of `self.virtual_resources`,
@@ -2497,7 +2512,7 @@ impl<'a> ResourceMap<'a> {
         );
 
         let ptr = <*const _>::cast(state);
-        let is_duplicate = self.map.iter().any(|&p| p == ptr);
+        let is_duplicate = self.map.contains(&ptr);
 
         // SAFETY: We checked that `virtual_id` is present in `self.virtual_resources` above, and
         // since we initialized `self.map` with a length at least that of `self.virtual_resources`,
@@ -2571,7 +2586,7 @@ impl<'a> ResourceMap<'a> {
         );
 
         let ptr = <*const _>::cast(state);
-        let is_duplicate = self.map.iter().any(|&p| p == ptr);
+        let is_duplicate = self.map.contains(&ptr);
 
         // SAFETY: We checked that `virtual_id` is present in `self.virtual_resources` above, and
         // since we initialized `self.map` with a length at least that of `self.virtual_resources`,

@@ -20,7 +20,7 @@ use crate::{
 };
 use ash::vk;
 use smallvec::SmallVec;
-use std::{ops::Range, sync::Arc};
+use std::sync::Arc;
 
 /// Represents a single write operation to the binding of a descriptor set.
 ///
@@ -72,12 +72,13 @@ impl WriteDescriptorSet {
     /// Use [`buffer_with_range`](Self::buffer_with_range) instead.
     #[inline]
     pub fn buffer(binding: u32, buffer: Subbuffer<impl ?Sized>) -> Self {
-        let range = 0..buffer.size();
+        let range = buffer.size();
         Self::buffer_with_range_array(
             binding,
             0,
             [DescriptorBufferInfo {
                 buffer: buffer.into_bytes(),
+                offset: 0,
                 range,
             }],
         )
@@ -96,9 +97,10 @@ impl WriteDescriptorSet {
             binding,
             first_array_element,
             elements.into_iter().map(|buffer| {
-                let range = 0..buffer.size();
+                let range = buffer.size();
                 DescriptorBufferInfo {
                     buffer: buffer.into_bytes(),
+                    offset: 0,
                     range,
                 }
             }),
@@ -385,16 +387,13 @@ impl WriteDescriptorSet {
 
         let device = layout.device();
 
-        let layout_binding = match layout.bindings().get(&binding) {
-            Some(layout_binding) => layout_binding,
-            None => {
-                return Err(Box::new(ValidationError {
-                    context: "binding".into(),
-                    problem: "does not exist in the descriptor set layout".into(),
-                    vuids: &["VUID-VkWriteDescriptorSet-dstBinding-00315"],
-                    ..Default::default()
-                }));
-            }
+        let Some(layout_binding) = layout.binding(binding) else {
+            return Err(Box::new(ValidationError {
+                context: "binding".into(),
+                problem: "does not exist in the descriptor set layout".into(),
+                vuids: &["VUID-VkWriteDescriptorSet-dstBinding-00315"],
+                ..Default::default()
+            }));
         };
 
         let max_descriptor_count = if layout_binding
@@ -1047,7 +1046,11 @@ impl WriteDescriptorSet {
                 };
 
                 for (index, buffer_info) in elements.iter().enumerate() {
-                    let DescriptorBufferInfo { buffer, range } = buffer_info;
+                    let &DescriptorBufferInfo {
+                        ref buffer,
+                        offset,
+                        range,
+                    } = buffer_info;
 
                     assert_eq!(device, buffer.device());
 
@@ -1067,12 +1070,15 @@ impl WriteDescriptorSet {
                         }));
                     }
 
-                    assert!(!range.is_empty());
+                    assert_ne!(range, 0);
 
-                    if range.end > buffer.size() {
+                    if !offset
+                        .checked_add(range)
+                        .is_some_and(|end| end <= buffer.size())
+                    {
                         return Err(Box::new(ValidationError {
                             context: format!("elements[{}]", index).into(),
-                            problem: "the end of the range is greater than the size of the buffer"
+                            problem: "`offset + size` is greater than the size of the buffer"
                                 .into(),
                             vuids: &["VUID-VkDescriptorBufferInfo-range-00342"],
                             ..Default::default()
@@ -1100,7 +1106,11 @@ impl WriteDescriptorSet {
                 };
 
                 for (index, buffer_info) in elements.iter().enumerate() {
-                    let DescriptorBufferInfo { buffer, range } = buffer_info;
+                    let &DescriptorBufferInfo {
+                        ref buffer,
+                        offset,
+                        range,
+                    } = buffer_info;
 
                     assert_eq!(device, buffer.device());
 
@@ -1120,12 +1130,15 @@ impl WriteDescriptorSet {
                         }));
                     }
 
-                    assert!(!range.is_empty());
+                    assert_ne!(range, 0);
 
-                    if range.end > buffer.size() {
+                    if !offset
+                        .checked_add(range)
+                        .is_some_and(|end| end <= buffer.size())
+                    {
                         return Err(Box::new(ValidationError {
                             context: format!("elements[{}]", index).into(),
-                            problem: "the end of the range is greater than the size of the buffer"
+                            problem: "`offset + size` is greater than the size of the buffer"
                                 .into(),
                             vuids: &["VUID-VkDescriptorBufferInfo-range-00342"],
                             ..Default::default()
@@ -1521,28 +1534,36 @@ pub struct DescriptorBufferInfo {
     /// The buffer to write to the descriptor.
     pub buffer: Subbuffer<[u8]>,
 
-    /// The slice of bytes in `buffer` that will be made available to the shader.
-    /// `range` must not be outside the range `buffer`.
+    /// The byte offset from `buffer` that will be made available to the shader. Must not be
+    /// outside the range `buffer`.
     ///
-    /// For dynamic buffer bindings, `range` specifies the slice that is to be bound if the
-    /// dynamic offset were zero. When binding the descriptor set, the effective value of `range`
-    /// shifts forward by the offset that was provided. For example, if `range` is specified as
-    /// `0..8` when writing the descriptor set, and then when binding the descriptor set the
-    /// offset `16` is used, then the range of `buffer` that will actually be bound is `16..24`.
-    pub range: Range<DeviceSize>,
+    /// For dynamic buffer bindings, `offset` specifies the offset that is to be bound if the
+    /// dynamic offset were zero. When binding the descriptor set, the effective value of `offset`
+    /// shifts forward by the offset that was provided. For example, if `offset` is specified as
+    /// `8` when writing the descriptor set, and then when binding the descriptor set the offset
+    /// `16` is used, then the offset from `buffer` that will actually be bound is `24`.
+    pub offset: DeviceSize,
+
+    /// The byte size that will be made available to the shader.
+    pub range: DeviceSize,
 }
 
 impl DescriptorBufferInfo {
     pub(crate) fn to_vk(&self) -> vk::DescriptorBufferInfo {
-        let Self { buffer, range } = self;
+        let &Self {
+            ref buffer,
+            offset,
+            range,
+        } = self;
 
-        debug_assert!(!range.is_empty());
-        debug_assert!(range.end <= buffer.buffer().size());
+        debug_assert_ne!(range, 0);
+        debug_assert!(offset < buffer.buffer().size());
+        debug_assert!(range <= buffer.buffer().size() - offset);
 
         vk::DescriptorBufferInfo {
             buffer: buffer.buffer().handle(),
-            offset: buffer.offset() + range.start,
-            range: range.end - range.start,
+            offset: buffer.offset() + offset,
+            range,
         }
     }
 }
@@ -1723,17 +1744,13 @@ impl CopyDescriptorSet {
             _ => (),
         }
 
-        let src_layout_binding = match src_set.layout().bindings().get(&src_binding) {
-            Some(layout_binding) => layout_binding,
-            None => {
-                return Err(Box::new(ValidationError {
-                    problem: "`src_binding` does not exist in the descriptor set layout of \
-                        `src_set`"
-                        .into(),
-                    vuids: &["VUID-VkCopyDescriptorSet-srcBinding-00345"],
-                    ..Default::default()
-                }));
-            }
+        let Some(src_layout_binding) = src_set.layout().binding(src_binding) else {
+            return Err(Box::new(ValidationError {
+                problem: "`src_binding` does not exist in the descriptor set layout of `src_set`"
+                    .into(),
+                vuids: &["VUID-VkCopyDescriptorSet-srcBinding-00345"],
+                ..Default::default()
+            }));
         };
 
         let src_max_descriptor_count = if src_layout_binding
@@ -1755,17 +1772,13 @@ impl CopyDescriptorSet {
             }));
         }
 
-        let dst_layout_binding = match dst_set.layout().bindings().get(&dst_binding) {
-            Some(layout_binding) => layout_binding,
-            None => {
-                return Err(Box::new(ValidationError {
-                    problem: "`dst_binding` does not exist in the descriptor set layout of \
-                        `dst_set`"
-                        .into(),
-                    vuids: &["VUID-VkCopyDescriptorSet-dstBinding-00347"],
-                    ..Default::default()
-                }));
-            }
+        let Some(dst_layout_binding) = dst_set.layout().binding(dst_binding) else {
+            return Err(Box::new(ValidationError {
+                problem: "`dst_binding` does not exist in the descriptor set layout of `dst_set`"
+                    .into(),
+                vuids: &["VUID-VkCopyDescriptorSet-dstBinding-00347"],
+                ..Default::default()
+            }));
         };
 
         let dst_max_descriptor_count = if dst_layout_binding
@@ -1926,16 +1939,13 @@ impl InvalidateDescriptorSet {
             ..
         } = self;
 
-        let layout_binding = match layout.bindings().get(&binding) {
-            Some(layout_binding) => layout_binding,
-            None => {
-                return Err(Box::new(ValidationError {
-                    context: "binding".into(),
-                    problem: "does not exist in the descriptor set layout".into(),
-                    vuids: &["VUID-VkWriteDescriptorSet-dstBinding-00315"],
-                    ..Default::default()
-                }));
-            }
+        let Some(layout_binding) = layout.binding(binding) else {
+            return Err(Box::new(ValidationError {
+                context: "binding".into(),
+                problem: "does not exist in the descriptor set layout".into(),
+                vuids: &["VUID-VkWriteDescriptorSet-dstBinding-00315"],
+                ..Default::default()
+            }));
         };
 
         debug_assert!(descriptor_count != 0);

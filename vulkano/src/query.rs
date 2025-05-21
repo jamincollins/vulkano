@@ -16,7 +16,6 @@ use ash::vk;
 use std::{
     mem::{size_of_val, MaybeUninit},
     num::NonZero,
-    ops::Range,
     ptr,
     sync::Arc,
 };
@@ -37,17 +36,17 @@ impl QueryPool {
     /// Creates a new `QueryPool`.
     #[inline]
     pub fn new(
-        device: Arc<Device>,
-        create_info: QueryPoolCreateInfo,
+        device: &Arc<Device>,
+        create_info: &QueryPoolCreateInfo<'_>,
     ) -> Result<Arc<QueryPool>, Validated<VulkanError>> {
-        Self::validate_new(&device, &create_info)?;
+        Self::validate_new(device, create_info)?;
 
         Ok(unsafe { Self::new_unchecked(device, create_info) }?)
     }
 
     fn validate_new(
         device: &Device,
-        create_info: &QueryPoolCreateInfo,
+        create_info: &QueryPoolCreateInfo<'_>,
     ) -> Result<(), Box<ValidationError>> {
         create_info
             .validate(device)
@@ -58,8 +57,8 @@ impl QueryPool {
 
     #[cfg_attr(not(feature = "document_unchecked"), doc(hidden))]
     pub unsafe fn new_unchecked(
-        device: Arc<Device>,
-        create_info: QueryPoolCreateInfo,
+        device: &Arc<Device>,
+        create_info: &QueryPoolCreateInfo<'_>,
     ) -> Result<Arc<QueryPool>, VulkanError> {
         let create_info_vk = create_info.to_vk();
 
@@ -90,11 +89,11 @@ impl QueryPool {
     /// - `create_info` must match the info used to create the object.
     #[inline]
     pub unsafe fn from_handle(
-        device: Arc<Device>,
+        device: &Arc<Device>,
         handle: vk::QueryPool,
-        create_info: QueryPoolCreateInfo,
+        create_info: &QueryPoolCreateInfo<'_>,
     ) -> Arc<QueryPool> {
-        let QueryPoolCreateInfo {
+        let &QueryPoolCreateInfo {
             query_type,
             query_count,
             pipeline_statistics,
@@ -103,7 +102,7 @@ impl QueryPool {
 
         Arc::new(QueryPool {
             handle,
-            device: InstanceOwnedDebugWrapper(device),
+            device: InstanceOwnedDebugWrapper(device.clone()),
             id: Self::next_id(),
             query_type,
             query_count,
@@ -147,37 +146,38 @@ impl QueryPool {
 
     /// Copies the results of a range of queries to a buffer on the CPU.
     ///
-    /// [`self.ty().result_len()`] will be written for each query in the range, plus 1 extra
-    /// element per query if [`WITH_AVAILABILITY`] is enabled. The provided buffer must be large
-    /// enough to hold the data.
+    /// [`self.result_len(flags)`] elements will be written for each query in the range, plus 1
+    /// extra element per query if [`WITH_AVAILABILITY`] is enabled. The provided buffer must be
+    /// large enough to hold the data.
     ///
-    /// `true` is returned if every result was available and written to the buffer. `false`
-    /// is returned if some results were not yet available; these will not be written to the
-    /// buffer.
+    /// `true` is returned if every result was available and written to the buffer. `false` is
+    /// returned if some results were not yet available; these will not be written to the buffer.
     ///
     /// See also [`copy_query_pool_results`].
     ///
-    /// [`self.ty().result_len()`]: QueryPool::result_len
+    /// [`self.result_len()`]: QueryPool::result_len
     /// [`WITH_AVAILABILITY`]: QueryResultFlags::WITH_AVAILABILITY
     /// [`copy_query_pool_results`]: crate::command_buffer::AutoCommandBufferBuilder::copy_query_pool_results
     #[inline]
     pub fn get_results<T>(
         &self,
-        range: Range<u32>,
+        first_query: u32,
+        query_count: u32,
         destination: &mut [T],
         flags: QueryResultFlags,
     ) -> Result<bool, Validated<VulkanError>>
     where
         T: QueryResultElement,
     {
-        self.validate_get_results(range.clone(), destination, flags)?;
+        self.validate_get_results(first_query, query_count, destination, flags)?;
 
-        Ok(unsafe { self.get_results_unchecked(range, destination, flags) }?)
+        Ok(unsafe { self.get_results_unchecked(first_query, query_count, destination, flags) }?)
     }
 
     fn validate_get_results<T>(
         &self,
-        range: Range<u32>,
+        first_query: u32,
+        query_count: u32,
         destination: &[T],
         flags: QueryResultFlags,
     ) -> Result<(), Box<ValidationError>>
@@ -198,18 +198,12 @@ impl QueryPool {
             }));
         }
 
-        if range.is_empty() {
+        if !first_query
+            .checked_add(query_count)
+            .is_some_and(|end| end <= self.query_count)
+        {
             return Err(Box::new(ValidationError {
-                context: "range".into(),
-                problem: "is empty".into(),
-                // vuids?
-                ..Default::default()
-            }));
-        }
-
-        if range.end > self.query_count {
-            return Err(Box::new(ValidationError {
-                problem: "`range.end` is greater than `self.query_count`".into(),
+                problem: "`first_query + query_count` is greater than `self.query_count()`".into(),
                 vuids: &[
                     "VUID-vkGetQueryPoolResults-firstQuery-00813",
                     "VUID-vkGetQueryPoolResults-firstQuery-00816",
@@ -226,7 +220,7 @@ impl QueryPool {
         // Ensured by choosing the stride ourselves.
 
         let per_query_len = self.result_len(flags);
-        let required_len = per_query_len * range.len() as DeviceSize;
+        let required_len = per_query_len * query_count as DeviceSize;
 
         if (destination.len() as DeviceSize) < required_len {
             return Err(Box::new(ValidationError {
@@ -257,7 +251,8 @@ impl QueryPool {
     #[cfg_attr(not(feature = "document_unchecked"), doc(hidden))]
     pub unsafe fn get_results_unchecked<T>(
         &self,
-        range: Range<u32>,
+        first_query: u32,
+        query_count: u32,
         destination: &mut [T],
         flags: QueryResultFlags,
     ) -> Result<bool, VulkanError>
@@ -272,8 +267,8 @@ impl QueryPool {
             (fns.v1_0.get_query_pool_results)(
                 self.device.handle(),
                 self.handle(),
-                range.start,
-                range.len() as u32,
+                first_query,
+                query_count,
                 size_of_val(destination),
                 destination.as_mut_ptr().cast(),
                 stride,
@@ -294,22 +289,30 @@ impl QueryPool {
     ///
     /// # Safety
     ///
-    /// For the queries indicated by `range`:
+    /// For the queries indicated by `first_query` and `query_count`:
     /// - There must be no operations pending or executing on the device.
     /// - There must be no calls to `reset*` or `get_results*` executing concurrently on another
     ///   thread.
     ///
     /// [`host_query_reset`]: crate::device::DeviceFeatures::host_query_reset
     #[inline]
-    pub unsafe fn reset(&self, range: Range<u32>) -> Result<(), Box<ValidationError>> {
-        self.validate_reset(range.clone())?;
+    pub unsafe fn reset(
+        &self,
+        first_query: u32,
+        query_count: u32,
+    ) -> Result<(), Box<ValidationError>> {
+        self.validate_reset(first_query, query_count)?;
 
-        unsafe { self.reset_unchecked(range) };
+        unsafe { self.reset_unchecked(first_query, query_count) };
 
         Ok(())
     }
 
-    fn validate_reset(&self, range: Range<u32>) -> Result<(), Box<ValidationError>> {
+    fn validate_reset(
+        &self,
+        first_query: u32,
+        query_count: u32,
+    ) -> Result<(), Box<ValidationError>> {
         if !self.device.enabled_features().host_query_reset {
             return Err(Box::new(ValidationError {
                 requires_one_of: RequiresOneOf(&[RequiresAllOf(&[Requires::DeviceFeature(
@@ -320,18 +323,21 @@ impl QueryPool {
             }));
         }
 
-        if range.is_empty() {
+        if query_count == 0 {
             return Err(Box::new(ValidationError {
-                context: "range".into(),
-                problem: "is empty".into(),
+                context: "query_count".into(),
+                problem: "is zero".into(),
                 // vuids?
                 ..Default::default()
             }));
         }
 
-        if range.end > self.query_count {
+        if !first_query
+            .checked_add(query_count)
+            .is_some_and(|end| end <= self.query_count)
+        {
             return Err(Box::new(ValidationError {
-                problem: "`range.end` is greater than `self.query_count`".into(),
+                problem: "`first_query + query_count` is greater than `self.query_count()`".into(),
                 vuids: &[
                     "VUID-vkResetQueryPool-firstQuery-09436",
                     "VUID-vkResetQueryPool-firstQuery-09437",
@@ -348,7 +354,7 @@ impl QueryPool {
     }
 
     #[cfg_attr(not(feature = "document_unchecked"), doc(hidden))]
-    pub unsafe fn reset_unchecked(&self, range: Range<u32>) {
+    pub unsafe fn reset_unchecked(&self, first_query: u32, query_count: u32) {
         let fns = self.device.fns();
 
         if self.device.api_version() >= Version::V1_2 {
@@ -356,8 +362,8 @@ impl QueryPool {
                 (fns.v1_2.reset_query_pool)(
                     self.device.handle(),
                     self.handle(),
-                    range.start,
-                    range.len() as u32,
+                    first_query,
+                    query_count,
                 )
             };
         } else {
@@ -366,8 +372,8 @@ impl QueryPool {
                 (fns.ext_host_query_reset.reset_query_pool_ext)(
                     self.device.handle(),
                     self.handle(),
-                    range.start,
-                    range.len() as u32,
+                    first_query,
+                    query_count,
                 )
             };
         }
@@ -402,7 +408,7 @@ impl_id_counter!(QueryPool);
 
 /// Parameters to create a new `QueryPool`.
 #[derive(Clone, Debug)]
-pub struct QueryPoolCreateInfo {
+pub struct QueryPoolCreateInfo<'a> {
     /// The type of query that the pool should be for.
     ///
     /// There is no default value.
@@ -420,10 +426,10 @@ pub struct QueryPoolCreateInfo {
     /// The default value is empty.
     pub pipeline_statistics: QueryPipelineStatisticFlags,
 
-    pub _ne: crate::NonExhaustive<'static>,
+    pub _ne: crate::NonExhaustive<'a>,
 }
 
-impl QueryPoolCreateInfo {
+impl QueryPoolCreateInfo<'_> {
     /// Returns a default `QueryPoolCreateInfo` with the provided `query_type`.
     #[inline]
     pub const fn new(query_type: QueryType) -> Self {
@@ -791,8 +797,8 @@ mod tests {
         let (device, _) = gfx_dev_and_queue!();
         assert!(matches!(
             QueryPool::new(
-                device,
-                QueryPoolCreateInfo {
+                &device,
+                &QueryPoolCreateInfo {
                     query_count: 256,
                     ..QueryPoolCreateInfo::new(QueryType::PipelineStatistics)
                 },
