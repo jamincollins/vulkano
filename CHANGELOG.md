@@ -9,7 +9,7 @@
 
 ### Public dependency updates
 
-- Rust version: 1.84.0
+- Rust version: 1.87
 - [shaderc](https://crates.io/crates/shaderc) 0.10.0
 
 ### Breaking changes
