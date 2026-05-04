@@ -84,6 +84,7 @@ Changes to descriptor sets:
 - Added `VulkanLibrary::loader`, which allows you to get the `get_instance_proc_addr` function pointer and give it to an external library.
 - Added `VulkanLibrary::from_path`, which allows you to load a Vulkan library from a specific path.
 - Vulkano-shaders: Allow defining per-shader macros in a `shader! { shaders: { ... } }` block in addition to global defines.
+- Vulkano-shaders: Added a `lang` option to the macro for defining the shader language.
 
 ### Bugs fixed
 
